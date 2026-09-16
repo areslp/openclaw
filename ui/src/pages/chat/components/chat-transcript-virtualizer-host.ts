@@ -1,7 +1,7 @@
 // Per-session virtualizer host: scroll anchoring, measurement, and row sync
 // for one transcript. Owned and swapped by ChatTranscriptController.
 import { VirtualizerController } from "@tanstack/lit-virtual";
-import { type Range, observeElementRect } from "@tanstack/virtual-core";
+import { type Range, elementScroll, observeElementRect } from "@tanstack/virtual-core";
 import {
   nothing,
   type ReactiveController,
@@ -10,7 +10,7 @@ import {
 } from "lit";
 import { McpAppUnmountGate } from "../../../components/mcp-app-unmount.ts";
 import { resolveScrollBehavior } from "../../../lib/scroll-behavior.ts";
-import type { AssistantMessageExpansionState } from "../chat-thread.ts";
+import type { AssistantMessageExpansionState } from "../chat-message-recovery.ts";
 import {
   CHAT_TRANSCRIPT_END_THRESHOLD_PX,
   type ChatSessionScrollPosition,
@@ -243,6 +243,12 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
       initialOffset: initialOffset ?? Number.MAX_SAFE_INTEGER,
       anchorTo: "end",
       followOnAppend: false,
+      scrollToFn: (offset, options, instance) => {
+        const before = this.scrollElement?.scrollTop ?? 0;
+        elementScroll(offset, options, instance);
+        // The observer owns provenance for every write, including absolute compensation retries.
+        this.offsetState.recordProgrammaticScroll?.(before, this.scrollElement?.scrollTop ?? 0);
+      },
       observeElementRect: (instance, callback) =>
         observeElementRect(instance, (rect) => {
           // Hidden tabs and detached faces are not viewport resizes. Keep the
@@ -279,6 +285,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
             state: this.offsetState,
             getScrollElement: () => this.scrollElement,
             prependAnchor: this.prependAnchor,
+            isProgrammaticScroll: () => this.isProgrammaticScroll,
             cancelScroll: () => this.cancelScroll(),
             requestUpdate: () => this.host.requestUpdate(),
             onReaderScroll: (towardEnd) => this.callbacks.onReaderScroll?.(towardEnd),
@@ -402,6 +409,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     this.expandedAssistantMessages.clear();
     this.expandedAssistantMessages = new Map();
     this.offsetState.scrollCommand = null;
+    this.offsetState.maintenanceScrollOffset = null;
     this.prependAnchor.clear();
     this.offsetState.touching = false;
     this.offsetState.touchScrolling = false;
@@ -557,8 +565,12 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     const element = this.scrollElement;
     // Lit's scroll listener can precede TanStack's offset observer. Read the
     // committed viewport so the final event publishes the settled end policy.
-    const distanceFromEnd = (maxTranscriptScrollOffset(element) ?? 0) - (element?.scrollTop ?? 0);
+    const maxOffset = maxTranscriptScrollOffset(element) ?? 0;
+    const distanceFromEnd = maxOffset - (element?.scrollTop ?? 0);
     return (
+      // A shrinking viewport range can clamp the write before its native read-back arrives.
+      (this.offsetState.maintenanceScrollOffset !== null &&
+        Math.min(this.offsetState.maintenanceScrollOffset, maxOffset) === element?.scrollTop) ||
       this.offsetState.pendingScrollOffset !== null ||
       (this.offsetState.scrollCommand !== null &&
         distanceFromEnd > CHAT_TRANSCRIPT_END_THRESHOLD_PX)
@@ -654,15 +666,20 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
 
   private completeMessageReveal(): void {
     const command = this.offsetState.scrollCommand;
-    if (
-      command?.target === "message" &&
-      this.messageReveal.reveal(
-        this.threadInnerElement,
-        command,
-        this.virtualizerController.getVirtualizer(),
-      )
-    ) {
+    if (command?.target !== "message") {
+      return;
+    }
+    const virtualizer = this.virtualizerController.getVirtualizer();
+    if (this.messageReveal.reveal(this.threadInnerElement, command, virtualizer)) {
       this.offsetState.scrollCommand = { behavior: command.behavior, target: "index" };
+      return;
+    }
+    // Expanding folded work can move the target beyond the initially mounted rows.
+    const rowKey = this.messageRowKeysById.get(command.messageId);
+    const rowIndex = rowKey ? this.rowIndexesByKey.get(rowKey) : undefined;
+    if (rowIndex !== undefined) {
+      virtualizer.scrollToIndex(rowIndex, { align: "center" });
+      this.host.requestUpdate();
     }
   }
 
@@ -706,15 +723,11 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
 
   /** Preserve the retained bubble even when a deferred offset selects another range. */
   private extractAnchoredRange(range: Range, indexes: ReadonlyMap<string, number>): number[] {
-    const visible = extractTranscriptRange(range, indexes, this.focusedRowKey);
     const messageKey = this.prependAnchor.messageKey;
     const rowKey =
       (messageKey === null ? null : this.committedMessageRowsByKey.get(messageKey)) ??
       this.prependAnchor.rowKey;
-    const anchorIndex = rowKey === null ? undefined : indexes.get(rowKey);
-    return anchorIndex === undefined || visible.includes(anchorIndex)
-      ? visible
-      : [...visible, anchorIndex].toSorted((left, right) => left - right);
+    return extractTranscriptRange(range, indexes, [this.focusedRowKey, rowKey]);
   }
 
   private syncRows(nextKeys: readonly string[]): void {
