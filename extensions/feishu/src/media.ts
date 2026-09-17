@@ -10,7 +10,6 @@ import {
   buildOutboundMediaLoadOptions,
   MEDIA_FFMPEG_MAX_AUDIO_DURATION_SECS,
   runFfmpeg,
-  runFfprobe,
   type OutboundMediaAccess,
 } from "openclaw/plugin-sdk/media-runtime";
 import { saveMediaBuffer, type SavedMedia } from "openclaw/plugin-sdk/media-store";
@@ -24,7 +23,6 @@ import {
 } from "openclaw/plugin-sdk/temp-path";
 import type { ClawdbotConfig } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
-import { raceWithTimeoutAndAbort } from "./async.js";
 import { createFeishuClient } from "./client.js";
 import { requestFeishuApi } from "./comment-shared.js";
 import { normalizeFeishuExternalKey } from "./external-keys.js";
@@ -32,6 +30,11 @@ import { saveMediaStreamWithIdleTimeout } from "./media-chunk-idle.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { resolveFeishuSendTarget } from "./send-target.js";
 import { sendReplyOrFallbackDirect } from "./send.js";
+import {
+  FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
+  maybeProbeUploadDurationMs,
+  maybeUploadVideoPreviewImageKey,
+} from "./video-preview.js";
 
 const FEISHU_MEDIA_HTTP_TIMEOUT_MS = 120_000;
 const FEISHU_MAX_FILE_UPLOAD_BYTES = 30 * 1024 * 1024;
@@ -39,11 +42,6 @@ const FEISHU_MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024;
 const FEISHU_VOICE_FILE_NAME = "voice.ogg";
 const FEISHU_VOICE_SAMPLE_RATE_HZ = 48_000;
 const FEISHU_VOICE_BITRATE = "64k";
-const FEISHU_VIDEO_PREVIEW_FILE_NAME = "preview.jpg";
-const FEISHU_VIDEO_PREVIEW_SEEK_SECONDS = "0.5";
-const FEISHU_VIDEO_PREVIEW_TIMEOUT_MS = 5_000;
-const FEISHU_VIDEO_PREVIEW_MAX_WIDTH = 1280;
-const FEISHU_VIDEO_PREVIEW_MAX_HEIGHT = 720;
 
 const FEISHU_SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
   "image/jpeg",
@@ -884,172 +882,6 @@ async function prepareFeishuVoiceMedia(params: {
   }
 }
 
-function inferVideoPreviewInputExtension(params: {
-  fileName: string;
-  contentType?: string;
-}): string {
-  const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
-  if (ext && ext.length <= 12) {
-    return ext;
-  }
-
-  switch (normalizeLowercaseStringOrEmpty(params.contentType)) {
-    case "video/quicktime":
-      return ".mov";
-    case "video/x-msvideo":
-      return ".avi";
-    default:
-      return ".mp4";
-  }
-}
-
-async function renderFeishuVideoPreviewFrame(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  maxBytes: number;
-}): Promise<Buffer | undefined> {
-  try {
-    return await withTempWorkspace(
-      { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-video-preview-" },
-      async (workspace) => {
-        const inputPath = await workspace.write(
-          `input${inferVideoPreviewInputExtension(params)}`,
-          params.buffer,
-        );
-        await writeExternalFileWithinRoot({
-          rootDir: workspace.dir,
-          path: FEISHU_VIDEO_PREVIEW_FILE_NAME,
-          write: async (outputPath) => {
-            await runFfmpeg(
-              [
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-ss",
-                FEISHU_VIDEO_PREVIEW_SEEK_SECONDS,
-                "-i",
-                inputPath,
-                "-vf",
-                `scale=${String(FEISHU_VIDEO_PREVIEW_MAX_WIDTH)}:${String(FEISHU_VIDEO_PREVIEW_MAX_HEIGHT)}:force_original_aspect_ratio=decrease`,
-                "-frames:v",
-                "1",
-                "-c:v",
-                "mjpeg",
-                "-q:v",
-                "3",
-                "-f",
-                "image2",
-                "-fs",
-                String(params.maxBytes + 1),
-                outputPath,
-              ],
-              { timeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS },
-            );
-          },
-        });
-        const previewStat = await fs.promises.stat(workspace.path(FEISHU_VIDEO_PREVIEW_FILE_NAME));
-        if (!previewStat.isFile() || previewStat.size === 0 || previewStat.size > params.maxBytes) {
-          throw new Error("Feishu video preview exceeds its image upload limit");
-        }
-        return await workspace.read(FEISHU_VIDEO_PREVIEW_FILE_NAME);
-      },
-    );
-  } catch (err) {
-    console.warn("[feishu] failed to render video preview; sending video without cover:", err);
-    return undefined;
-  }
-}
-
-async function maybeUploadVideoPreviewImageKey(params: {
-  cfg: ClawdbotConfig;
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  msgType: "file" | "audio" | "media";
-  accountId?: string;
-  mediaMaxBytes: number;
-}): Promise<string | undefined> {
-  if (params.msgType !== "media") {
-    return undefined;
-  }
-
-  const preview = await renderFeishuVideoPreviewFrame({
-    ...params,
-    maxBytes: Math.min(params.mediaMaxBytes, FEISHU_MAX_IMAGE_UPLOAD_BYTES),
-  });
-  if (!preview) {
-    return undefined;
-  }
-
-  try {
-    const result = await raceWithTimeoutAndAbort(
-      uploadImageFeishu({
-        cfg: params.cfg,
-        image: preview,
-        accountId: params.accountId,
-        httpTimeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
-      }),
-      { timeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS },
-    );
-    if (result.status !== "resolved") {
-      console.warn("[feishu] video preview upload timed out; sending video without cover");
-      return undefined;
-    }
-    return result.value.imageKey;
-  } catch (err) {
-    console.warn("[feishu] failed to upload video preview; sending video without cover:", err);
-    return undefined;
-  }
-}
-
-async function probeMediaDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-}): Promise<number | undefined> {
-  try {
-    return await withTempWorkspace(
-      { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-media-probe-" },
-      async (workspace) => {
-        const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
-        const inferredExt =
-          ext && ext.length <= 12
-            ? ext
-            : mediaKindFromMime(params.contentType) === "video"
-              ? ".mp4"
-              : ".ogg";
-        const inputPath = await workspace.write(`input${inferredExt}`, params.buffer);
-        const stdout = await runFfprobe(
-          ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", inputPath],
-          { timeoutMs: 5_000 },
-        );
-        const seconds = Number.parseFloat(stdout.trim());
-        if (!Number.isFinite(seconds) || seconds <= 0) {
-          return undefined;
-        }
-        return Math.max(1, Math.round(seconds * 1000));
-      },
-    );
-  } catch (err) {
-    console.warn("[feishu] failed to probe media duration; upload will omit it:", err);
-    return undefined;
-  }
-}
-
-async function maybeProbeUploadDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  msgType: "file" | "audio" | "media";
-}): Promise<number | undefined> {
-  if (params.msgType !== "audio" && params.msgType !== "media") {
-    return undefined;
-  }
-  return await probeMediaDurationMs(params);
-}
-
 /**
  * Upload and send media (image or file) from URL, local path, or buffer.
  * Local paths require host-owned mediaAccess or approved legacy roots/readers.
@@ -1202,13 +1034,20 @@ export async function sendMediaFeishu(params: {
   );
   const imageKey = await runBeforeFeishuMessageDispatch(() =>
     maybeUploadVideoPreviewImageKey({
-      cfg,
       buffer,
       fileName: name,
       contentType,
       msgType,
-      accountId,
-      mediaMaxBytes,
+      maxBytes: Math.min(mediaMaxBytes, FEISHU_MAX_IMAGE_UPLOAD_BYTES),
+      uploadImage: async (preview) =>
+        (
+          await uploadImageFeishu({
+            cfg,
+            image: preview,
+            accountId,
+            httpTimeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
+          })
+        ).imageKey,
     }),
   );
   const result = await sendFileFeishu({
