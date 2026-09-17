@@ -1,7 +1,7 @@
 // Slack plugin module implements client behavior.
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { type WebClientOptions, WebClient } from "@slack/web-api";
-import type { SlackLookupClientOptions } from "./client-options.js";
+import type { SlackLookupClientOptions, SlackProxyDispatcher } from "./client-options.js";
 import {
   resolveSlackLookupClientOptions,
   resolveSlackReadClientOptions,
@@ -36,8 +36,12 @@ export function createSlackWebClient(token: string, options: WebClientOptions = 
   return new WebClient(token, resolveSlackWebClientOptions(options));
 }
 
-export function createSlackReadClient(token: string, options: WebClientOptions = {}) {
-  return new WebClient(token, resolveSlackReadClientOptions(options));
+export function createSlackReadClient(
+  token: string,
+  options: WebClientOptions = {},
+  dispatcher?: SlackProxyDispatcher,
+) {
+  return new WebClient(token, resolveSlackReadClientOptions(options, dispatcher));
 }
 
 function createSlackStartupAuthFetch(baseFetch: SlackFetch): SlackFetch {
@@ -82,12 +86,19 @@ export function createSlackLookupClient(token: string, options: SlackLookupClien
   return new WebClient(token, resolveSlackLookupClientOptions(options));
 }
 
-export function createSlackWriteClient(token: string, options: WebClientOptions = {}) {
-  return new WebClient(token, resolveSlackWriteClientOptions(options));
+export function createSlackWriteClient(
+  token: string,
+  options: WebClientOptions = {},
+  assertDirectAdapterHandoff?: () => void,
+) {
+  return new WebClient(
+    token,
+    resolveSlackWriteClientOptions(options, undefined, assertDirectAdapterHandoff),
+  );
 }
 
 export function createSlackTokenCacheKey(token: string): string {
-  return `sha256:${createHash("sha256").update(token).digest("base64url")}`;
+  return `sha256:${hash("sha256", token, "base64url")}`;
 }
 
 function slackWriteClientCacheKey(token: string, options: SlackWriteClientCacheOptions): string {
