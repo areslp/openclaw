@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { expectWindowRetiredAfterFinal } from "./bot-message-dispatch.progress-window.test-helpers.js";
 import {
   describeTelegramDispatch,
+  emitToolStart,
   allDeliveredReplyTexts,
   createContext,
   deliverReplies,
@@ -24,7 +25,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
         await replyOptions?.onItemEvent?.({ kind: "preamble", itemId: "c1", progressText: "Note" });
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver({ text: "Done" }, { kind: "final" });
         return { queuedFinal: true };
       },
@@ -44,18 +45,18 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     expectDeliveredReply(0, { text: "Done" });
   });
 
-  it("retires a tool-progress-only window after durable reasoning and a mid-turn boundary", async () => {
+  it("keeps tool progress and the final answer after durable reasoning and an assistant boundary", async () => {
     loadSessionStore.mockReturnValue({ s1: { reasoningLevel: "on" } });
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver(
           { text: "<think>hidden</think>", isReasoning: true },
           { kind: "block" },
         );
         await replyOptions?.onAssistantMessageStart?.();
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-2" });
         await dispatcherOptions.deliver({ text: "Done" }, { kind: "final" });
         return { queuedFinal: true };
       },
@@ -69,17 +70,18 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
       telegramCfg: { streaming: { mode: "progress", progress: { toolProgress: true } } },
     });
 
-    expect(answerDraftStream.clear).not.toHaveBeenCalled();
+    expect(answerDraftStream.updatePreview).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining("Exec") }),
+    );
     expect(allDeliveredReplyTexts()).toContain("Done");
   });
 
-  it("keeps a single stationary window when text follows durable reasoning (no mid-turn rotation)", async () => {
-    // Interim answer text must not rotate or render into the progress window.
+  it("delivers the final rather than interim answer text after durable reasoning", async () => {
     loadSessionStore.mockReturnValue({ s1: { reasoningLevel: "on" } });
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver(
           { text: "<think>hidden</think>", isReasoning: true },
           { kind: "block" },
@@ -98,18 +100,20 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
       telegramCfg: { streaming: { mode: "progress", progress: { toolProgress: true } } },
     });
 
-    expect(answerDraftStream.rotateToNewMessageDeferringDelete).not.toHaveBeenCalled();
-    expect(answerDraftStream.clear).toHaveBeenCalledTimes(1);
+    expect(answerDraftStream.update).not.toHaveBeenCalledWith("Here is the answer");
+    expect(allDeliveredReplyTexts().filter((text) => text === "Here is the answer.")).toEqual([
+      "Here is the answer.",
+    ]);
   });
 
-  it("uses one stationary window message across a multi-boundary turn (commentary→tool→commentary→tool→final)", async () => {
+  it("preserves commentary and tool progress across multiple assistant boundaries before the final", async () => {
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
         await replyOptions?.onItemEvent?.({ kind: "preamble", itemId: "c1", progressText: "Look" });
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await replyOptions?.onItemEvent?.({ kind: "preamble", itemId: "c2", progressText: "Now" });
-        await replyOptions?.onToolStart?.({ name: "read", phase: "start" });
+        await emitToolStart(replyOptions, { name: "read", toolCallId: "read-1", phase: "start" });
         await dispatcherOptions.deliver({ text: "Final answer" }, { kind: "final" });
         return { queuedFinal: true };
       },
@@ -123,15 +127,10 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
       },
     });
 
-    const windowMessageIds = new Set(
-      answerDraftStream.updatePreview.mock.calls
-        .map(() => answerDraftStream.messageId())
-        .filter((id) => id != null),
-    );
-    expect(windowMessageIds).toEqual(new Set([2001]));
-    expect(answerDraftStream.updatePreview.mock.calls.length).toBeGreaterThan(1);
-    expect(answerDraftStream.clear).not.toHaveBeenCalled();
-    expect(answerDraftStream.rotateToNewMessageDeferringDelete).toHaveBeenCalledTimes(1);
+    const previews = answerDraftStream.updatePreview.mock.calls.map(([preview]) => preview.text);
+    for (const text of ["Look", "Exec", "Now", "Read"]) {
+      expect(previews).toContainEqual(expect.stringContaining(text));
+    }
     expectDeliveredReply(0, { text: "Final answer" });
     expectWindowRetiredAfterFinal(answerDraftStream, deliverReplies);
   });
@@ -150,7 +149,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
             progressText: `Commentary ${index}`,
           });
         }
-        await replyOptions?.onToolStart?.({ name: "Bash", phase: "start" });
+        await emitToolStart(replyOptions, { name: "Bash", toolCallId: "bash-1", phase: "start" });
         await dispatcherOptions.deliver({ text: "TEST DONE" }, { kind: "final" });
         return { queuedFinal: true };
       },
@@ -179,7 +178,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         // Intermediate assistant answer prose mid-turn.
         await dispatcherOptions.deliver({ text: "Interim answer prose" }, { kind: "block" });
         await dispatcherOptions.deliver({ text: "The real final answer." }, { kind: "final" });
@@ -212,7 +211,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
         replyOptions?.onVerboseProgressVisibility?.(() => true);
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver({ text: "Done" }, { kind: "final" });
         return { queuedFinal: true };
       },
@@ -274,7 +273,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver({ text: "Branch is up to date" }, { kind: "final" });
         await dispatcherOptions.deliver({ text: trailingFinalStatusText }, { kind: "final" });
         return { queuedFinal: true };
@@ -290,7 +289,10 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     });
 
     expect(answerDraftStream.updatePreview).toHaveBeenCalledWith(
-      telegramProgressPreview("Cracking\n\n🛠️ Exec", "<b>Cracking</b>\n<b>🛠️ Exec</b>"),
+      telegramProgressPreview(
+        "Cracking\n\n🛠️ Exec running",
+        "<b>Cracking</b>\n<b>🛠️ Exec</b> <i>running</i>",
+      ),
     );
     expect(answerDraftStream.update).toHaveBeenCalledTimes(1);
     expect(answerDraftStream.update).toHaveBeenNthCalledWith(
@@ -311,7 +313,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onToolStart?.({ name: "exec", phase: "start" });
+        await emitToolStart(replyOptions, { name: "exec", phase: "start", toolCallId: "exec-1" });
         await dispatcherOptions.deliver(
           { text: "stdout line one\nstdout line two" },
           { kind: "tool" },
@@ -335,7 +337,7 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     expect(answerDraftStream.updatePreview).toHaveBeenLastCalledWith(
       telegramProgressPreview(
         "Shelling\n\n🛠️ Exec\n🔎 Web Search: docs lookup",
-        "<b>Shelling</b>\n<b>🛠️ Exec</b>\n<b>🔎 Web Search</b> docs lookup",
+        "<b>Shelling</b>\n<b>🛠️ Exec</b> <i>running</i>\n<b>🔎 Web Search</b> docs lookup",
       ),
     );
     expect(deliverReplies).not.toHaveBeenCalled();

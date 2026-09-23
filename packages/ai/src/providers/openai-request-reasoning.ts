@@ -45,22 +45,29 @@ export function resolveOpenAIRequestReasoning(
   const effort =
     !model.reasoning || supported?.length === 0 || intent === undefined
       ? undefined
-      : mapped !== undefined
-        ? intent
-        : supported === undefined
-          ? requested === "off"
+      : supported === undefined
+        ? mapped !== undefined
+          ? intent
+          : requested === "off"
             ? "none"
             : requested
-          : resolveOpenAIReasoningEffortForModel({ model, effort: requested });
+        : resolveOpenAIReasoningEffortForModel({
+            model,
+            effort: requested,
+            fallbackMap: { [requested]: intent },
+          });
   return {
     // Chat-template and binary controls carry the requested level itself; they are not
     // gated by scalar reasoning_effort support.
     level: intent === undefined ? undefined : normalizedIntent,
-    // Subscription routes do not inherit Platform none support from a shared model name.
+    // Sol and Luna accept none on ChatGPT; other subscription models need route metadata.
     effort:
       effort === "none" &&
       resolveOpenAIThinkingApi(model.api) === "openai-chatgpt-responses" &&
-      !supportsOpenAIReasoningEffort({ compat: model.compat }, "none")
+      !supportsOpenAIReasoningEffort(
+        model.id === "gpt-6-sol" || model.id === "gpt-6-luna" ? model : { compat: model.compat },
+        "none",
+      )
         ? undefined
         : effort,
     // Binary thinking is independent of scalar effort support.

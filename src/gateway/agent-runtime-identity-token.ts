@@ -24,6 +24,7 @@ import {
   withAgentRuntimeExecutionLineageRedemption,
 } from "./agent-runtime-execution-lineage.js";
 import type { AgentRuntimeSessionSpawnContext } from "./agent-runtime-session-spawn-context.js";
+import { hasCronCreatorGrantProvenance } from "./cron-creator-authority-grant.js";
 import type { CronCreatorAuthorityGrant } from "./cron-creator-authority-grant.types.js";
 import {
   resolveMessageActionTurnCapability,
@@ -142,6 +143,7 @@ const spawnModelAutoSelectionSchema = z.object({
 });
 const sessionSpawnContextSchema = z
   .object({
+    requesterProfileId: normalizedRequiredStringSchema.optional(),
     completionOwnerSessionKey: normalizedRequiredStringSchema.optional(),
     resolvedModel: z
       .object({
@@ -157,6 +159,7 @@ const sessionSpawnContextSchema = z
     spawnModelAutoSelection: spawnModelAutoSelectionSchema.optional(),
   })
   .transform((context): AgentRuntimeSessionSpawnContext => ({
+    ...(context.requesterProfileId ? { requesterProfileId: context.requesterProfileId } : {}),
     ...(context.completionOwnerSessionKey
       ? { completionOwnerSessionKey: context.completionOwnerSessionKey }
       : {}),
@@ -387,7 +390,7 @@ function parsePayload(value: unknown, nowMs: number): AgentRuntimeIdentityTokenP
     const cronToolsAllowCapture = raw.cronToolsAllowCapture;
     const cronExecToolTarget = cronToolsAllowCapture ? raw.cronExecToolTarget : undefined;
     const cronCreatorAuthorityGrant = raw.cronCreatorAuthorityGrant;
-    if (cronCreatorAuthorityGrant && !cronToolsAllowCapture) {
+    if (!hasCronCreatorGrantProvenance(raw, operationalRunId)) {
       return undefined;
     }
     let executionIdentity: ExecutionIdentityAdmissionToken | undefined;
@@ -499,11 +502,10 @@ function prepareAgentRuntimeIdentityTokenPayload(
   const delegatedAuthority: AgentRuntimeDelegatedAuthority = params.workerTurnClaim
     ? { kind: "worker", ...approvalAuthority, turnClaim: params.workerTurnClaim }
     : { kind: "local", ...approvalAuthority };
-  if (
-    params.cronCreatorAuthorityGrant &&
-    params.cronToolsAllowCapture !== "final-executable-surface"
-  ) {
-    throw new Error("cron creator authority grants require final tool-surface provenance");
+  if (!hasCronCreatorGrantProvenance(params, operationalRunId)) {
+    throw new Error(
+      "cron creator authority grants require tool-surface or authenticated-requester provenance",
+    );
   }
   if (
     params.messageActionContext?.sourceReplyFinal === true &&
