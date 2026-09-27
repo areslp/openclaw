@@ -218,12 +218,19 @@ describe("OpenAI thinking contract", () => {
     },
   );
 
-  it.each(["managed", "direct"] as const)(
-    "keeps undeclared chat-template thinking binary over %s HTTP",
-    async (transport) => {
+  // GPT-family ids infer scalar effort lists; only an explicit declaration enables tiers.
+  it.each(
+    (["managed", "direct"] as const).flatMap((transport) =>
+      ["qwen3.6-27b", "gpt-5.5"].map((modelId) => ({ transport, modelId })),
+    ),
+  )(
+    "keeps undeclared chat-template thinking binary for $modelId over $transport HTTP",
+    async ({ transport, modelId }) => {
       const payload = await captureHttpProviderPayload({
         api: "openai-completions",
         thinkingFormat: "qwen-chat-template",
+        reasoningCompat: {},
+        modelId,
         transport,
         thinkingLevel: "high",
         mode: "agent",
@@ -326,9 +333,10 @@ async function captureHttpProviderPayload(params: {
   api: "openai-completions" | "openai-responses";
   thinkingFormat?: "qwen" | "qwen-chat-template";
   reasoningCompat?: {
-    supportedReasoningEfforts: string[];
+    supportedReasoningEfforts?: string[];
     reasoningEffortMap?: Record<string, string>;
   };
+  modelId?: string;
   transport?: "managed" | "direct";
   thinkingLevelMap?: Model["thinkingLevelMap"];
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -363,7 +371,7 @@ async function captureHttpProviderPayload(params: {
     },
     async (baseUrl) => {
       const model: Model = {
-        id: params.api === "openai-completions" ? "qwen3.6-27b" : "gpt-5.5",
+        id: params.modelId ?? (params.api === "openai-completions" ? "qwen3.6-27b" : "gpt-5.5"),
         name: "Thinking contract model",
         api: params.api,
         provider: "local-thinking",

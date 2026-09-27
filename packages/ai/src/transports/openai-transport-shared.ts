@@ -14,7 +14,7 @@ import { applyProviderReportedUsageCost, calculateCost } from "../model-utils.js
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
 /** Shared options, usage shape, cache identity, and ordering for OpenAI APIs. */
 import { clampOpenAIPromptCacheKey } from "../providers/openai-prompt-cache.js";
-import { resolveOpenAIModelReasoningEfforts } from "../providers/openai-reasoning-effort.js";
+import { readCompatReasoningEfforts } from "../providers/openai-reasoning-effort.js";
 import { headersToRecord } from "../utils/headers.js";
 import { notifyProviderHttpResponse } from "./transport-stream-shared.js";
 
@@ -419,13 +419,14 @@ export function isOpenAICompletionsThinkingEnabled(effort: string): boolean {
 
 /**
  * Chat templates read `reasoning_effort` only when the model declares its accepted values in
- * `compat.supportedReasoningEfforts`; other templates keep binary thinking and their default.
+ * `compat.supportedReasoningEfforts`; lists inferred from GPT-family ids do not count, and
+ * other templates keep binary thinking and their default.
  */
 export function resolveChatTemplateReasoningEffort(
   model: OpenAIModeModel,
   reasoning: { effort: string | undefined; thinkingEnabled: boolean | undefined },
 ): string | undefined {
-  return reasoning.thinkingEnabled && resolveOpenAIModelReasoningEfforts(model)?.length
+  return reasoning.thinkingEnabled && readCompatReasoningEfforts(model.compat)?.length
     ? reasoning.effort
     : undefined;
 }
