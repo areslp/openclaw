@@ -82,6 +82,7 @@ describe("OpenAI thinking contract", () => {
 
     expect(result.errorMessage).toBe("captured binary payload");
     expect(payload).toMatchObject({ chat_template_kwargs: { enable_thinking: true } });
+    expect(payload).not.toHaveProperty("chat_template_kwargs.reasoning_effort");
     expect(profile.levels.map(({ id }) => id)).toContain("high");
   });
 
@@ -163,6 +164,12 @@ describe("OpenAI thinking contract", () => {
     },
   );
 
+  // Qwen 3.8 templates accept low, medium, and xhigh; the map keeps high at the deepest tier.
+  const qwen38ChatTemplateEfforts = {
+    supportedReasoningEfforts: ["low", "medium", "xhigh"],
+    reasoningEffortMap: { high: "xhigh" },
+  };
+
   it.each(
     (["managed", "direct"] as const).flatMap((transport) =>
       (
@@ -177,11 +184,12 @@ describe("OpenAI thinking contract", () => {
       ).map(([thinkingLevel, reasoningEffort]) => ({ transport, thinkingLevel, reasoningEffort })),
     ),
   )(
-    "maps Agent $thinkingLevel to Qwen chat-template effort $reasoningEffort over $transport HTTP",
+    "maps Agent $thinkingLevel to declared chat-template effort $reasoningEffort over $transport HTTP",
     async ({ transport, thinkingLevel, reasoningEffort }) => {
       const payload = await captureHttpProviderPayload({
         api: "openai-completions",
         thinkingFormat: "qwen-chat-template",
+        reasoningCompat: qwen38ChatTemplateEfforts,
         transport,
         thinkingLevel,
         mode: "agent",
@@ -195,17 +203,34 @@ describe("OpenAI thinking contract", () => {
   );
 
   it.each(["managed", "direct"] as const)(
-    "omits Qwen chat-template effort when Agent thinking is off over %s HTTP",
+    "omits declared chat-template effort when Agent thinking is off over %s HTTP",
     async (transport) => {
       const payload = await captureHttpProviderPayload({
         api: "openai-completions",
         thinkingFormat: "qwen-chat-template",
+        reasoningCompat: qwen38ChatTemplateEfforts,
         transport,
         thinkingLevel: "off",
         mode: "agent",
       });
       expect(payload.chat_template_kwargs).toMatchObject({ enable_thinking: false });
       expect(payload).not.toHaveProperty("chat_template_kwargs.reasoning_effort");
+    },
+  );
+
+  it.each(["managed", "direct"] as const)(
+    "keeps undeclared chat-template thinking binary over %s HTTP",
+    async (transport) => {
+      const payload = await captureHttpProviderPayload({
+        api: "openai-completions",
+        thinkingFormat: "qwen-chat-template",
+        transport,
+        thinkingLevel: "high",
+        mode: "agent",
+      });
+      expect(payload.chat_template_kwargs).toMatchObject({ enable_thinking: true });
+      expect(payload).not.toHaveProperty("chat_template_kwargs.reasoning_effort");
+      expect(payload).not.toHaveProperty("reasoning_effort");
     },
   );
 
@@ -300,6 +325,10 @@ function openAIThinkingPolicyRegistry() {
 async function captureHttpProviderPayload(params: {
   api: "openai-completions" | "openai-responses";
   thinkingFormat?: "qwen" | "qwen-chat-template";
+  reasoningCompat?: {
+    supportedReasoningEfforts: string[];
+    reasoningEffortMap?: Record<string, string>;
+  };
   transport?: "managed" | "direct";
   thinkingLevelMap?: Model["thinkingLevelMap"];
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -346,7 +375,12 @@ async function captureHttpProviderPayload(params: {
         contextWindow: 128_000,
         maxTokens: 4_096,
         ...(params.thinkingFormat
-          ? { compat: { thinkingFormat: params.thinkingFormat, supportsReasoningEffort: false } }
+          ? {
+              compat: {
+                thinkingFormat: params.thinkingFormat,
+                ...(params.reasoningCompat ?? { supportsReasoningEffort: false }),
+              },
+            }
           : {}),
       };
       const providerStream =

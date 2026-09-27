@@ -14,6 +14,7 @@ import { applyProviderReportedUsageCost, calculateCost } from "../model-utils.js
 import type { BaseOpenAIStreamOptions } from "../provider-options.js";
 /** Shared options, usage shape, cache identity, and ordering for OpenAI APIs. */
 import { clampOpenAIPromptCacheKey } from "../providers/openai-prompt-cache.js";
+import { resolveOpenAIModelReasoningEfforts } from "../providers/openai-reasoning-effort.js";
 import { headersToRecord } from "../utils/headers.js";
 import { notifyProviderHttpResponse } from "./transport-stream-shared.js";
 
@@ -417,25 +418,16 @@ export function isOpenAICompletionsThinkingEnabled(effort: string): boolean {
 }
 
 /**
- * Qwen 3.8 chat templates accept `reasoning_effort` values low, medium, and xhigh, and use
- * xhigh when it is unset. Disabled or unknown levels leave the template default in place.
+ * Chat templates read `reasoning_effort` only when the model declares its accepted values in
+ * `compat.supportedReasoningEfforts`; other templates keep binary thinking and their default.
  */
-export function resolveQwenChatTemplateReasoningEffort(
-  effort: string | undefined,
-): "low" | "medium" | "xhigh" | undefined {
-  switch (effort?.trim().toLowerCase()) {
-    case "minimal":
-    case "low":
-      return "low";
-    case "medium":
-      return "medium";
-    case "high":
-    case "xhigh":
-    case "max":
-      return "xhigh";
-    default:
-      return undefined;
-  }
+export function resolveChatTemplateReasoningEffort(
+  model: OpenAIModeModel,
+  reasoning: { effort: string | undefined; thinkingEnabled: boolean | undefined },
+): string | undefined {
+  return reasoning.thinkingEnabled && resolveOpenAIModelReasoningEfforts(model)?.length
+    ? reasoning.effort
+    : undefined;
 }
 
 export function readOpenAICompletionsContentDeltas(

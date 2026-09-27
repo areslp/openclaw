@@ -52,7 +52,7 @@ import {
 import {
   log,
   resolvePromptCacheKey,
-  resolveQwenChatTemplateReasoningEffort,
+  resolveChatTemplateReasoningEffort,
   sortTransportToolsByName,
   type OpenAIModeModel,
 } from "./openai-transport-shared.js";
@@ -224,8 +224,8 @@ function setQwenChatTemplateThinking(
 
 /** Return whether the binary control replaces scalar reasoning effort. */
 function applyBinaryCompletionsThinkingParams(params: {
+  chatTemplateReasoningEffort: string | undefined;
   compatThinkingFormat: string;
-  level: string | undefined;
   modelReasoning: boolean;
   payload: Record<string, unknown>;
   thinkingEnabled: boolean;
@@ -236,11 +236,7 @@ function applyBinaryCompletionsThinkingParams(params: {
   const enabled = params.thinkingEnabled;
   switch (params.compatThinkingFormat) {
     case "qwen-chat-template":
-      setQwenChatTemplateThinking(
-        params.payload,
-        enabled,
-        resolveQwenChatTemplateReasoningEffort(params.level),
-      );
+      setQwenChatTemplateThinking(params.payload, enabled, params.chatTemplateReasoningEffort);
       return true;
     case "qwen":
       params.payload.enable_thinking = enabled;
@@ -580,8 +576,8 @@ export function buildOpenAICompletionsRequest(
     applyDirectCompletionsReasoningAndRouting(params, model, reasoning, compat);
   } else {
     const suppressScalarEffort = applyBinaryCompletionsThinkingParams({
+      chatTemplateReasoningEffort: resolveChatTemplateReasoningEffort(model, reasoning),
       compatThinkingFormat: compat.thinkingFormat,
-      level: reasoning.level,
       modelReasoning: model.reasoning,
       payload: params,
       thinkingEnabled: thinkingEnabled ?? false,

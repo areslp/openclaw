@@ -1,7 +1,7 @@
 import type { resolveOpenAIRequestReasoning } from "../providers/openai-request-reasoning.js";
 import type { ResolvedOpenAICompletionsCompat } from "./openai-completions-compat.js";
 import {
-  resolveQwenChatTemplateReasoningEffort,
+  resolveChatTemplateReasoningEffort,
   type OpenAIModeModel,
 } from "./openai-transport-shared.js";
 
@@ -21,7 +21,7 @@ export function applyDirectCompletionsReasoningAndRouting(
   } else if (compat.thinkingFormat === "qwen" && model.reasoning) {
     params.enable_thinking = reasoningEnabled;
   } else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
-    const chatTemplateReasoningEffort = resolveQwenChatTemplateReasoningEffort(reasoning.level);
+    const chatTemplateReasoningEffort = resolveChatTemplateReasoningEffort(model, reasoning);
     params.chat_template_kwargs = {
       enable_thinking: reasoningEnabled,
       preserve_thinking: true,
