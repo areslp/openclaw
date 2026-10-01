@@ -125,7 +125,7 @@ export async function maybeUploadVideoPreviewImageKey(params: {
   }
 }
 
-async function probeMediaDurationMs(params: {
+export async function probeFeishuMediaDurationMs(params: {
   buffer: Buffer;
   fileName: string;
   contentType?: string;
@@ -157,16 +157,4 @@ async function probeMediaDurationMs(params: {
     console.warn("[feishu] failed to probe media duration; upload will omit it:", err);
     return undefined;
   }
-}
-
-export async function maybeProbeUploadDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-  msgType: "file" | "audio" | "media";
-}): Promise<number | undefined> {
-  if (params.msgType !== "audio" && params.msgType !== "media") {
-    return undefined;
-  }
-  return await probeMediaDurationMs(params);
 }

@@ -1,18 +1,19 @@
 import { performance } from "node:perf_hooks";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
+import * as registryRead from "../agents/subagents/registry/subagent-registry-read.js";
 import { setRuntimeConfigSnapshot } from "../config/config.js";
 import * as transcripts from "../config/sessions/session-accessor.js";
 import * as activeEvents from "../config/sessions/session-accessor.sqlite-active-events.js";
-import { writeSessionEntry } from "../config/sessions/session-accessor.sqlite-entry-store.js";
-import { appendTranscriptEventsInTransaction } from "../config/sessions/session-accessor.sqlite-transcript-store.js";
+import { MAX_SESSION_ROW_FACTS_KEYS } from "../config/sessions/session-transcript-worker.types.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
-import { runOpenClawAgentWriteTransaction } from "../state/openclaw-agent-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { sessionByKeyReadHandlers } from "./server-methods/sessions-read-by-key.js";
 import { requestContext } from "./server-methods/sessions-read-cache.test-support.js";
+import { retainSessionListForegroundWork } from "./session-projection-work.js";
 import { bindSessionRowProjection } from "./session-row-projection-access.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
+import { seedSessionRowProjectionTranscriptFixture } from "./session-row-projection.transcript-fixture.test-support.js";
 import * as rowInputs from "./session-utils-row.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -21,58 +22,7 @@ it("serves describe during a 2,048-session drain without transcript reads in row
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const cfg = { agents: { list: [{ id: "main", default: true }] } };
     setRuntimeConfigSnapshot(cfg);
-    const count = 2_048;
-    const content = "Synthetic transcript payload. ".repeat(512);
-    runOpenClawAgentWriteTransaction(
-      (database) => {
-        for (let index = 0; index < count; index++) {
-          const sessionId = `legacy-${index}`;
-          const sessionKey = `agent:main:${sessionId}`;
-          writeSessionEntry(
-            database,
-            sessionKey,
-            {
-              sessionId,
-              updatedAt: index + 1,
-              ...(index === count / 2
-                ? {
-                    status: "done" as const,
-                    lastRunId: "fallback-run",
-                    providerOverride: "unit-test",
-                    modelOverride: "selected",
-                    fallbackNotice: {
-                      kind: "active" as const,
-                      selectedModel: "unit-test/selected",
-                      activeModel: "unit-test/fallback",
-                    },
-                  }
-                : {}),
-            },
-            { canonicalPreviousEntry: null, previousEntry: null },
-          );
-          appendTranscriptEventsInTransaction(
-            database,
-            { agentId: "main", sessionId, sessionKey },
-            [
-              { type: "session", version: 3, id: sessionId },
-              {
-                type: "message",
-                id: "user",
-                parentId: null,
-                message: { role: "user", content: `Explain legacy session ${index}` },
-              },
-              {
-                type: "message",
-                id: "assistant",
-                parentId: "user",
-                message: { role: "assistant", content },
-              },
-            ],
-          );
-        }
-      },
-      { agentId: "main" },
-    );
+    const count = seedSessionRowProjectionTranscriptFixture();
     for (const index of [0, count - 1]) {
       expect(
         transcripts.readSessionTranscriptMessageEventPage(
@@ -88,9 +38,14 @@ it("serves describe during a 2,048-session drain without transcript reads in row
     console.log("Prepared 2,048 legacy rows and transcript graphs");
     let inMaterialization = false;
     let materializationTranscriptReads = 0;
+    let describeInFlight = false;
+    let describeMaterializations = 0;
     const readInputs = rowInputs.readSessionRowInputs;
     vi.spyOn(rowInputs, "readSessionRowInputs").mockImplementation((params) => {
       inMaterialization = true;
+      if (describeInFlight) {
+        describeMaterializations++;
+      }
       try {
         return readInputs(params);
       } finally {
@@ -125,39 +80,52 @@ it("serves describe during a 2,048-session drain without transcript reads in row
       },
     );
     const context = requestContext(cfg);
+    const indexBuilds = vi.spyOn(registryRead, "buildSubagentSessionListReadIndex");
     const cpu = process.threadCpuUsage();
     const started = performance.now();
     const initializing = createSessionRowProjection({ cfg });
     await nextTurn();
-    const requestStarted = performance.now();
     const projection = await initializing;
     bindSessionRowProjection(context, () => projection);
     const startupMs = performance.now() - started;
-    const respond = vi.fn();
-    try {
-      await sessionByKeyReadHandlers["sessions.describe"]!({
-        req: { type: "req", id: "under-drain", method: "sessions.describe" },
-        params: { key: "agent:main:legacy-2047", includeDerivedTitles: true },
-        context,
-        client: null,
-        isWebchatConnect: () => false,
-        respond,
+    /** Resolves with the dirty rows left at the reply and the rows materialized meanwhile. */
+    const describe = async (id: string, includeDerivedTitles?: boolean) => {
+      let remainingAtResponse = 0;
+      const respond = vi.fn().mockImplementation(() => {
+        remainingAtResponse = projection.dirtyRowCount;
       });
+      const releaseForeground = retainSessionListForegroundWork();
+      describeInFlight = true;
+      describeMaterializations = 0;
+      try {
+        await sessionByKeyReadHandlers["sessions.describe"]!({
+          req: { type: "req", id, method: "sessions.describe" },
+          params: { key: "agent:main:legacy-2047", includeDerivedTitles },
+          context,
+          client: null,
+          isWebchatConnect: () => false,
+          respond,
+        });
+      } finally {
+        describeInFlight = false;
+        releaseForeground();
+      }
+      expect(respond).toHaveBeenCalledExactlyOnceWith(true, {
+        session: expect.objectContaining({ key: "agent:main:legacy-2047" }),
+      });
+      return { remainingAtResponse, materializedRows: describeMaterializations };
+    };
+    try {
+      const requestStarted = performance.now();
+      const underDrain = await describe("under-drain", true);
       const describeMs = performance.now() - requestStarted;
-      const remainingAtResponse = projection.dirtyRowCount;
       await projection.ensureMaterialized();
       const initialDrainMs = performance.now() - started;
       const initialDrainCpu = process.threadCpuUsage(cpu);
+      expect(indexBuilds).toHaveBeenCalledTimes(1);
       sessionChanges.emit({ all: true, scope: "config" });
       const dirtyRequestStarted = performance.now();
-      await sessionByKeyReadHandlers["sessions.describe"]!({
-        req: { type: "req", id: "dirty-drain", method: "sessions.describe" },
-        params: { key: "agent:main:legacy-2047" },
-        context,
-        client: null,
-        isWebchatConnect: () => false,
-        respond,
-      });
+      const dirtyDrain = await describe("dirty-drain");
       const dirtyDescribeMs = performance.now() - dirtyRequestStarted;
       console.log(
         JSON.stringify({
@@ -167,22 +135,25 @@ it("serves describe during a 2,048-session drain without transcript reads in row
           initialDrainThreadCpuMs: (initialDrainCpu.user + initialDrainCpu.system) / 1000,
           describeMs,
           dirtyDescribeMs,
-          remainingAtResponse,
+          underDrainRows: underDrain.materializedRows,
+          dirtyDrainRows: dirtyDrain.materializedRows,
+          remainingAfterDirtyResponse: dirtyDrain.remainingAtResponse,
+          remainingAtResponse: underDrain.remainingAtResponse,
           materializationTranscriptReads,
           materializationUsageReads,
           materializationBoundedReads,
         }),
       );
-      expect(respond).toHaveBeenCalledWith(true, {
-        session: expect.objectContaining({ key: "agent:main:legacy-2047" }),
-      });
       expect(materializationTranscriptReads).toBe(0);
       expect(materializationUsageReads).toBe(0);
       expect(materializationBoundedReads).toBe(0);
-      expect(describeMs).toBeLessThan(100);
-      expect(dirtyDescribeMs).toBeLessThan(100);
       // A response must not depend on completion of unrelated resident rows.
-      expect(remainingAtResponse).toBeGreaterThan(0);
+      expect(underDrain.remainingAtResponse).toBeGreaterThan(0);
+      expect(dirtyDrain.remainingAtResponse).toBeGreaterThan(0);
+      // A keyed read materializes its own exact facts and at most the bulk batch
+      // already in flight; the drain parks behind the retained exact preparation.
+      expect(underDrain.materializedRows).toBeLessThanOrEqual(MAX_SESSION_ROW_FACTS_KEYS + 1);
+      expect(dirtyDrain.materializedRows).toBeLessThanOrEqual(MAX_SESSION_ROW_FACTS_KEYS + 1);
     } finally {
       projection.dispose();
     }

@@ -1,16 +1,34 @@
 import path from "node:path";
-import { expect } from "vitest";
-import type { UpdateRunResult } from "../../infra/update-runner.js";
+import { expect, vi } from "vitest";
+import * as containerEnvironment from "../../infra/container-environment.js";
+import type { UpdateRunRecord } from "../../infra/update-run-record.js";
+import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import type { UpdateRecoveryStep } from "../../shared/update-outcome.js";
+import * as versionManagerPath from "../../shared/version-manager-path.js";
+import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
 import { createCommandResult } from "../../test-utils/npm-spec-install-test-helpers.js";
 import { quoteCliArg, quotePowerShellArg } from "../quote-cli-arg.js";
 
-export const expectedNpmProbes = [
-  ["npm", "--version"],
-  expect.toBeOneOf([
-    ["npm", "prefix", "-g"],
-    [process.execPath, expect.stringMatching(/[/\\]npm-cli\.js$/u), "prefix", "-g"],
-  ]),
+export function stubNodeRuntime() {
+  const nodeExecutable = resolveTestNodeExecPath();
+  const versions = { ...process.versions, bun: undefined };
+  vi.spyOn(process, "execPath", "get").mockReturnValue(nodeExecutable);
+  vi.spyOn(process, "versions", "get").mockReturnValue(versions);
+}
+
+export function mockNonContainerSystemRuntime(): void {
+  vi.spyOn(versionManagerPath, "resolveNodeVersionManager").mockReturnValue("system");
+  vi.spyOn(containerEnvironment, "isContainerEnvironment").mockReturnValue(false);
+}
+
+export const alreadyCurrentConvergenceCases = [
+  { restart: true, running: true, failure: undefined },
+  { restart: false, running: true, failure: undefined },
+  { restart: true, running: false, failure: undefined },
+  { restart: true, running: true, failure: "doctor" },
+  { restart: true, running: true, failure: "stop" },
+  { restart: true, running: true, failure: undefined, platform: "linux" as const },
+  { restart: true, running: true, failure: "changed owner" },
 ];
 
 export function expectedRuntimeSelectionCommand(manager: "nvm" | "fnm", version: string): string {
@@ -28,12 +46,18 @@ export function expectedPlainRecovery(
     ? "unset OPENCLAW_HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_PROFILE OPENCLAW_GATEWAY_PORT OPENCLAW_LAUNCHD_LABEL OPENCLAW_SYSTEMD_UNIT OPENCLAW_WINDOWS_TASK_NAME OPENCLAW_WORKSPACE_DIR"
     : undefined,
   root?: string,
+  pinnedServiceNode?: string,
 ): string {
   return [
     "Recovery:",
     "1. Use the same service account and keep the existing OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH overrides throughout recovery.",
     ...(context ? [`2. Run \`${context}\`.`] : []),
     `2. Install and select Node ${node} using your system package manager or https://nodejs.org/en/download.`,
+    ...(pinnedServiceNode
+      ? [
+          `3. The Gateway service still selects ${pinnedServiceNode}. Before continuing, have its deployment owner select Node ${node} in the service definition while retaining its installation, service account, and state/config selectors. Switching the shell runtime alone does not update that service definition.`,
+        ]
+      : []),
     root
       ? `3. Run \`node ${process.platform === "win32" ? quotePowerShellArg(path.join(root, "openclaw.mjs")) : quoteCliArg(path.join(root, "openclaw.mjs"))} update --tag ${version}\`.`
       : "3. Run this installation's absolute openclaw.mjs launcher with the selected Node and the update command to recheck package and service ownership before installation.",
@@ -131,4 +155,36 @@ export function currentGitCoreFixture(root: string, version: string) {
       failedStep: { recoverySteps },
     },
   };
+}
+
+export function expectInterruptedDoctorPackageRollback(runs: UpdateRunRecord[]): void {
+  expect(runs).toMatchObject([
+    {
+      phase: "finished",
+      status: "failed",
+      reason: "doctor-failed",
+      verification: {
+        recovery: {
+          serviceRestartSafe: false,
+          packageRollbackVerified: true,
+          reason: "runtime-verification-failed",
+        },
+        rollbackOutcome: { status: "succeeded" },
+      },
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          step: "openclaw doctor",
+          status: "failed",
+          detail: expect.stringContaining("interrupted lifecycle"),
+          failureFacts: expect.arrayContaining([
+            expect.objectContaining({
+              check: "openclaw doctor",
+              code: "Error",
+              message: "interrupted lifecycle",
+            }),
+          ]),
+        }),
+      ]),
+    },
+  ]);
 }
