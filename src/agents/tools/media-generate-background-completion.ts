@@ -7,7 +7,6 @@ import {
   type SessionTranscriptTargetBinding,
 } from "../../config/sessions/transcript-target-binding.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.js";
-import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { SessionDeliveryRequesterBinding } from "../../infra/session-delivery-queue.records.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
@@ -68,11 +67,7 @@ export async function retainBlockedMediaCompletion(params: {
     expectedSessionId: target.sessionId,
     expectedLifecycleRevision: target.lifecycleRevision,
     idempotencyKey: `media-completion-retained:${handle.runId}`,
-    // Keyed appends run this inside the transaction, after awaited preparation.
-    beforeMessageWrite: ({ message }) => {
-      assertCurrent();
-      return message;
-    },
+    assertCurrent,
     text: "Generated media is ready, but completion delivery was not confirmed. The saved media is retained here.",
     mediaUrls: Array.from(
       new Set([
@@ -134,14 +129,12 @@ function buildMediaGenerationReplyInstruction(params: {
 }
 
 export async function wakeMediaGenerationTaskCompletion(params: {
-  config?: OpenClawConfig;
   handle: MediaGenerationTaskHandle | null;
   status: "ok" | "error";
   statusLabel: string;
   result: string;
   attachments?: AgentGeneratedAttachment[];
   mediaUrls?: string[];
-  statsLine?: string;
   eventSource: AgentInternalEvent["source"];
   announceType: string;
   toolName: string;
@@ -225,16 +218,13 @@ export async function wakeMediaGenerationTaskCompletion(params: {
       result: params.result,
       ...(params.attachments?.length ? { attachments: params.attachments } : {}),
       ...(mediaUrls.length ? { mediaUrls } : {}),
-      ...(params.statsLine?.trim() ? { statsLine: params.statsLine } : {}),
       replyInstruction: buildMediaGenerationReplyInstruction({
         status: params.status,
         completionLabel: params.completionLabel,
       }),
     },
   ];
-  const triggerMessage =
-    formatAgentInternalEventsForPrompt(internalEvents) ||
-    `A ${params.completionLabel} generation task finished. Process the completion update now.`;
+  const triggerMessage = formatAgentInternalEventsForPrompt(internalEvents);
   const delivery = await deliverSubagentAnnouncement({
     isSourceSessionAdmissionAllowed: isSourceCurrent,
     isSourceSessionEffectsAllowed: isSourceCurrent,
@@ -243,7 +233,6 @@ export async function wakeMediaGenerationTaskCompletion(params: {
     targetRequesterSessionKey: target.sessionKey,
     preparedRequester: { binding: requesterBinding, entry: requesterEntry },
     triggerMessage,
-    steerMessage: triggerMessage,
     internalEvents,
     requesterSessionOrigin: handle.requesterOrigin,
     completionDirectOrigin: handle.requesterOrigin,

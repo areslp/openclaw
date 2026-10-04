@@ -65,6 +65,7 @@ export function createGatewayCloseTestDepsFactory(mocks: GatewayCloseFixtureMock
       tailscaleCleanup: null,
       stopChannel: vi.fn(async () => undefined),
       pluginServices: null,
+      stopScheduler: vi.fn(async () => {}),
       disposeAllBundleLspRuntimes: mocks.disposeAllBundleLspRuntimes,
       drainRetainedOpenAiEmbeddingProviders: mocks.drainRetainedEmbeddingProviders,
       stopGmailWatcher: mocks.stopGmailWatcher,
@@ -73,7 +74,6 @@ export function createGatewayCloseTestDepsFactory(mocks: GatewayCloseFixtureMock
       cron: { stop: vi.fn() },
       heartbeatRunner: { stop: vi.fn() } as never,
       updateCheckStop: null,
-      nodePresenceTimers: new Map(),
       broadcast: vi.fn(),
       maintenance: {
         stopPeriodicTasks: vi.fn(async () => {}),

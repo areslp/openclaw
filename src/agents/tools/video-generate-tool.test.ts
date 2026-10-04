@@ -26,6 +26,7 @@ import * as pluginConfig from "../../plugins/config-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../../plugins/current-plugin-metadata-snapshot.js";
 import { setCurrentPluginMetadataSnapshot } from "../../plugins/current-plugin-metadata.test-support.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
+import { listKnownProviderAuthEnvVarNamesCore } from "../../secrets/provider-env-vars.js";
 import * as videoGenerationRuntime from "../../video-generation/runtime.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { formatAgentInternalEventsForPrompt } from "../internal-events.js";
@@ -94,70 +95,9 @@ const probeMediaFilesWithinBudgetMock = vi.hoisted(() =>
   vi.fn(async (inputs: readonly unknown[]) => inputs.map(() => ({}))),
 );
 
-const VIDEO_GENERATION_PROVIDER_AUTH_ENV_VARS = [
-  "OPENAI_API_KEY",
-  "OPENAI_API_KEYS",
-  "GEMINI_API_KEY",
-  "GEMINI_API_KEYS",
-  "GOOGLE_API_KEY",
-  "GOOGLE_API_KEYS",
-  "DEEPINFRA_API_KEY",
-  "MODELSTUDIO_API_KEY",
-  "DASHSCOPE_API_KEY",
-  "QWEN_API_KEY",
-  "BYTEPLUS_API_KEY",
-  "COMFY_API_KEY",
-  "COMFY_CLOUD_API_KEY",
-  "FAL_KEY",
-  "FAL_API_KEY",
-  "MINIMAX_CODE_PLAN_KEY",
-  "MINIMAX_CODING_API_KEY",
-  "MINIMAX_API_KEY",
-  "MINIMAX_OAUTH_TOKEN",
-  "OPENROUTER_API_KEY",
-  "RUNWAYML_API_SECRET",
-  "RUNWAY_API_KEY",
-  "TOGETHER_API_KEY",
-  "XAI_API_KEY",
-  "VYDRA_API_KEY",
-] as const;
 vi.mock("../../media/media-probe.js", () => ({
   probeMediaFilesWithinBudget: probeMediaFilesWithinBudgetMock,
 }));
-
-const GENERATION_PROVIDER_ENV_VARS = [
-  "BYTEPLUS_API_KEY",
-  "COMFY_API_KEY",
-  "COMFY_CLOUD_API_KEY",
-  "DASHSCOPE_API_KEY",
-  "DEEPINFRA_API_KEY",
-  "FAL_API_KEY",
-  "FAL_KEY",
-  "GCLOUD_PROJECT",
-  "GEMINI_API_KEY",
-  "GEMINI_API_KEYS",
-  "GOOGLE_API_KEY",
-  "GOOGLE_API_KEYS",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "GOOGLE_CLOUD_API_KEY",
-  "GOOGLE_CLOUD_LOCATION",
-  "GOOGLE_CLOUD_PROJECT",
-  "LITELLM_API_KEY",
-  "MINIMAX_API_KEY",
-  "MINIMAX_CODE_PLAN_KEY",
-  "MINIMAX_CODING_API_KEY",
-  "MINIMAX_OAUTH_TOKEN",
-  "MODELSTUDIO_API_KEY",
-  "OPENAI_API_KEY",
-  "OPENAI_API_KEYS",
-  "OPENROUTER_API_KEY",
-  "QWEN_API_KEY",
-  "RUNWAY_API_KEY",
-  "RUNWAYML_API_SECRET",
-  "TOGETHER_API_KEY",
-  "VYDRA_API_KEY",
-  "XAI_API_KEY",
-];
 
 function asConfig(value: unknown): OpenClawConfig {
   return value as OpenClawConfig;
@@ -203,16 +143,12 @@ function mockVideoPluginProvider(capabilities: Record<string, unknown> = {}) {
   ]);
 }
 
-function createVideoPluginTool() {
-  const tool = createVideoGenerateTool({
-    config: configWithDefaults({
-      videoGenerationModel: { primary: "video-plugin/vid-v1" },
+function createConfiguredVideoTool(primary = "video-plugin/vid-v1") {
+  return expectVideoGenerateTool(
+    createVideoGenerateTool({
+      config: configWithDefaults({ videoGenerationModel: { primary } }),
     }),
-  });
-  if (!tool) {
-    throw new Error("expected video_generate tool");
-  }
-  return tool;
+  );
 }
 
 function mockSavedVideoResult(fileName = "out.mp4") {
@@ -261,9 +197,9 @@ function toolParameterProperties(tool: ReturnType<typeof createVideoGenerateTool
   return parameters.properties ?? {};
 }
 
-function resetVideoGenerateMocks() {
+function resetVideoGenerateMocks(providerEnvVars: readonly string[]) {
   vi.restoreAllMocks();
-  for (const key of VIDEO_GENERATION_PROVIDER_AUTH_ENV_VARS) {
+  for (const key of providerEnvVars) {
     vi.stubEnv(key, "");
   }
   vi.spyOn(videoGenerationRuntime, "listRuntimeVideoGenerationProviders").mockReturnValue([]);
@@ -283,19 +219,27 @@ function resetVideoGenerateMocks() {
 
 describe("createVideoGenerateTool", () => {
   let emptyConfigTool: ReturnType<typeof createVideoGenerateTool>;
+  let providerEnvVars: string[];
 
   beforeAll(() => {
-    resetVideoGenerateMocks();
+    providerEnvVars = [
+      ...listKnownProviderAuthEnvVarNamesCore({ config: {} }),
+      "GCLOUD_PROJECT",
+      "GEMINI_API_KEYS",
+      "GOOGLE_API_KEYS",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "GOOGLE_CLOUD_LOCATION",
+      "GOOGLE_CLOUD_PROJECT",
+      "OPENAI_API_KEYS",
+    ];
+    resetVideoGenerateMocks(providerEnvVars);
     emptyConfigTool = createVideoGenerateTool({ config: asConfig({}) });
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
   });
 
   beforeEach(() => {
-    resetVideoGenerateMocks();
-    for (const envVar of GENERATION_PROVIDER_ENV_VARS) {
-      vi.stubEnv(envVar, "");
-    }
+    resetVideoGenerateMocks(providerEnvVars);
   });
 
   afterEach(() => {
@@ -309,13 +253,13 @@ describe("createVideoGenerateTool", () => {
     expect(emptyConfigTool).toBeNull();
   });
 
-  it("treats legacy OpenAI-Codex auth profiles as canonical OpenAI video auth", () => {
+  it("exposes video generation for an auth-backed video provider", () => {
     vi.spyOn(videoGenerationRuntime, "listRuntimeVideoGenerationProviders").mockReturnValue([]);
 
     expectVideoGenerateTool(
       createVideoGenerateTool({
         config: asConfig({}),
-        authProfileStore: createAuthStore(["openai"]),
+        authProfileStore: createAuthStore(["runway"]),
       }),
     );
   });
@@ -341,7 +285,7 @@ describe("createVideoGenerateTool", () => {
     const properties = toolParameterProperties(
       createVideoGenerateTool({
         config: configWithDefaults({
-          videoGenerationModel: { primary: "openai/sora-2" },
+          videoGenerationModel: { primary: "runway/gen4.5" },
         }),
       }),
     );
@@ -428,7 +372,7 @@ describe("createVideoGenerateTool", () => {
     const properties = toolParameterProperties(
       createVideoGenerateTool({
         config: configWithDefaults({
-          videoGenerationModel: { primary: "openai/sora-2" },
+          videoGenerationModel: { primary: "runway/gen4.5" },
         }),
       }),
     );
@@ -449,7 +393,7 @@ describe("createVideoGenerateTool", () => {
           },
           agents: {
             defaults: {
-              videoGenerationModel: { primary: "openai/sora-2" },
+              videoGenerationModel: { primary: "runway/gen4.5" },
             },
           },
         }),
@@ -658,14 +602,7 @@ describe("createVideoGenerateTool", () => {
       .spyOn(mediaStore, "saveMediaBuffer")
       .mockResolvedValueOnce(savedMedia("generated-lobster.mp4", 11));
 
-    const tool = createVideoGenerateTool({
-      config: configWithDefaults({
-        videoGenerationModel: { primary: "qwen/wan2.6-t2v" },
-      }),
-    });
-    if (!tool) {
-      throw new Error("expected video_generate tool");
-    }
+    const tool = createConfiguredVideoTool("qwen/wan2.6-t2v");
 
     await tool.execute("call-default-cap", { prompt: "friendly lobster surfing" });
 
@@ -796,6 +733,19 @@ describe("createVideoGenerateTool", () => {
     expect(delivered.audioAsVoice).toBeUndefined();
   });
 
+  it("rejects an undeliverable video before saving any earlier assets", async () => {
+    mockGeneratedVideo({
+      videos: [videoAsset("valid", "valid.mp4"), { mimeType: "video/mp4" }],
+    });
+    const saveMediaBuffer = vi.spyOn(mediaStore, "saveMediaBuffer");
+    const tool = createConfiguredVideoTool("qwen/wan2.6-t2v");
+
+    await expect(tool.execute("call-invalid-asset", { prompt: "two videos" })).rejects.toThrow(
+      "Provider qwen returned a video asset with neither buffer nor url — cannot deliver.",
+    );
+    expect(saveMediaBuffer).not.toHaveBeenCalled();
+  });
+
   it("rolls back earlier video saves after sequential persistence fails", async () => {
     mockGeneratedVideo({
       videos: [
@@ -822,14 +772,7 @@ describe("createVideoGenerateTool", () => {
     const deleteMediaBuffer = vi
       .spyOn(mediaStore, "deleteMediaBuffer")
       .mockRejectedValueOnce(new Error("video cleanup failed"));
-    const tool = createVideoGenerateTool({
-      config: configWithDefaults({
-        videoGenerationModel: { primary: "qwen/wan2.6-t2v" },
-      }),
-    });
-    if (!tool) {
-      throw new Error("expected video_generate tool");
-    }
+    const tool = createConfiguredVideoTool("qwen/wan2.6-t2v");
 
     await expect(tool.execute("call-partial-save", { prompt: "two videos" })).rejects.toBe(
       terminalError,
@@ -857,14 +800,7 @@ describe("createVideoGenerateTool", () => {
       .mockRejectedValueOnce(SaveMediaSourceError.tooLarge(16 * 1024 * 1024))
       .mockResolvedValueOnce(savedMedia("second.mp4", 18));
 
-    const tool = createVideoGenerateTool({
-      config: configWithDefaults({
-        videoGenerationModel: { primary: "fal/fal-ai/minimax/video-01-live" },
-      }),
-    });
-    if (!tool) {
-      throw new Error("expected video_generate tool");
-    }
+    const tool = createConfiguredVideoTool("fal/fal-ai/minimax/video-01-live");
 
     const result = await tool.execute("call-url-fallback", {
       prompt: "friendly lobster surfing",
@@ -1476,7 +1412,7 @@ describe("createVideoGenerateTool", () => {
   it("rejects providerOptions that is not a plain JSON object", async () => {
     mockVideoPluginProvider();
     const generateSpy = vi.spyOn(videoGenerationRuntime, "generateVideo");
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     // Array-shaped providerOptions should be rejected up front, not cast to a
     // Record with numeric-string keys and silently forwarded.
@@ -1505,7 +1441,7 @@ describe("createVideoGenerateTool", () => {
       providerOptions: { seed: "number", draft: "boolean" },
     });
     const generateSpy = mockSavedVideoResult();
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await tool.execute("call-1", {
       prompt: "lobster",
@@ -1525,7 +1461,7 @@ describe("createVideoGenerateTool", () => {
       imageToVideo: { enabled: true, maxInputImages: 2 },
     });
     const generateSpy = vi.spyOn(videoGenerationRuntime, "generateVideo");
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await expect(
       tool.execute("call-1", {
@@ -1541,7 +1477,7 @@ describe("createVideoGenerateTool", () => {
   it("rejects *Roles that are not arrays", async () => {
     mockVideoPluginProvider();
     const generateSpy = vi.spyOn(videoGenerationRuntime, "generateVideo");
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await expect(
       tool.execute("call-1", {
@@ -1598,7 +1534,7 @@ describe("createVideoGenerateTool", () => {
         imageToVideo: { enabled: true, maxInputImages: 2 },
       });
       const generateSpy = mockSavedVideoResult();
-      const tool = createVideoPluginTool();
+      const tool = createConfiguredVideoTool();
 
       await tool.execute("call-1", {
         prompt: "lobster",
@@ -1624,7 +1560,7 @@ describe("createVideoGenerateTool", () => {
       contentType: "image/png",
     });
     const generateSpy = mockSavedVideoResult();
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await tool.execute("call-1", {
       prompt: "lobster",
@@ -1678,7 +1614,7 @@ describe("createVideoGenerateTool", () => {
       maxInputAudios: 1,
     });
     const generateSpy = vi.spyOn(videoGenerationRuntime, "generateVideo");
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await expect(
       tool.execute("call-1", {
@@ -1692,7 +1628,7 @@ describe("createVideoGenerateTool", () => {
   it("accepts provider-specific aspectRatio and resolution values and forwards them to the runtime", async () => {
     mockVideoPluginProvider();
     const generateSpy = mockSavedVideoResult();
-    const tool = createVideoPluginTool();
+    const tool = createConfiguredVideoTool();
 
     await tool.execute("call-1", {
       prompt: "lobster",
