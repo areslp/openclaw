@@ -17,19 +17,25 @@ const messageCreateMock = vi.hoisted(() => vi.fn());
 const messageReplyMock = vi.hoisted(() => vi.fn());
 
 const emptyConfig: ClawdbotConfig = {};
-vi.mock("./client.js", () => ({ createFeishuClient: createFeishuClientMock }));
+vi.mock("./client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./client.js")>()),
+  createFeishuClient: createFeishuClientMock,
+}));
 
-vi.mock("./accounts.js", () => ({
+vi.mock("./accounts.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./accounts.js")>()),
   resolveFeishuAccount: resolveFeishuAccountMock,
   resolveFeishuRuntimeAccount: resolveFeishuAccountMock,
 }));
 
-vi.mock("./targets.js", () => ({
+vi.mock("./targets.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./targets.js")>()),
   normalizeFeishuTarget: normalizeFeishuTargetMock,
   resolveReceiveIdType: resolveReceiveIdTypeMock,
 }));
 
-vi.mock("./runtime.js", () => ({
+vi.mock("./runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./runtime.js")>()),
   getFeishuRuntime: () => ({ media: { loadWebMedia: loadWebMediaMock } }),
 }));
 

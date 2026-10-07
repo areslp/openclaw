@@ -667,20 +667,23 @@ export async function sendMediaFeishu(
     });
     return isImage ? { image_key: key } : { file_key: key };
   });
-  const imageKey = await maybeUploadVideoPreviewImageKey({
-    ...prepared,
-    msgType: routing.msgType,
-    maxBytes: Math.min(mediaMaxBytes, FEISHU_MAX_IMAGE_UPLOAD_BYTES),
-    uploadImage: (image) =>
-      runBeforeFeishuMessageDispatch(() =>
-        uploadImageFeishu({
-          cfg,
-          image,
-          accountId,
-          httpTimeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
-        }),
-      ),
-  });
+  const imageKey =
+    routing.msgType === "media"
+      ? await maybeUploadVideoPreviewImageKey({
+          ...prepared,
+          msgType: routing.msgType,
+          maxBytes: Math.min(mediaMaxBytes, FEISHU_MAX_IMAGE_UPLOAD_BYTES),
+          uploadImage: (image) =>
+            runBeforeFeishuMessageDispatch(() =>
+              uploadImageFeishu({
+                cfg,
+                image,
+                accountId,
+                httpTimeoutMs: FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
+              }),
+            ),
+        })
+      : undefined;
   const mediaWithCover =
     "file_key" in media && imageKey ? { ...media, image_key: imageKey } : media;
   const result = await sendUploadedMediaFeishu(params, mediaWithCover, routing.msgType);
