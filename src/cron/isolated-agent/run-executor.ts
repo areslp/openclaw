@@ -74,7 +74,7 @@ import {
   setCronSessionRuntimeModel,
   syncCronSessionLiveSelection,
 } from "./run-session-state.js";
-import { resolveCronThinkingSelection } from "./run-thinking.js";
+import { resolveCronCandidateThinkingSelection } from "./run-thinking.js";
 import type {
   CronCompletedPromptRun,
   CronExecutionResult,
@@ -361,7 +361,7 @@ function createCronPromptExecutor(
           }
         }
         // Revalidate the candidate without rewriting the durable thinking preference.
-        const candidateThinking = resolveCronThinkingSelection({
+        const candidateThinking = resolveCronCandidateThinkingSelection({
           cfg: params.cfgWithAgentDefaults,
           agentId: params.agentId,
           provider: providerOverride,

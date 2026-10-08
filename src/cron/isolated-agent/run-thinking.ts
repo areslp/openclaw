@@ -1,7 +1,7 @@
 import { resolveThinkingSelection } from "./run.runtime.js";
 
 /** Keep candidate intent separate from the resolved model default. */
-export function resolveCronThinkingSelection(
+export function resolveCronCandidateThinkingSelection(
   params: Parameters<typeof resolveThinkingSelection>[0],
 ) {
   const { level } = resolveThinkingSelection(params);
