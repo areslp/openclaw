@@ -183,18 +183,52 @@ describe("subagent thinking precedence", () => {
       expected: "off",
       override: undefined,
     },
-  ])("preserves $name", ({ requester, target, global, caller, expected, override }) => {
-    expect(
-      resolveSubagentThinkingOverride({
-        cfg: { agents: { defaults: { subagents: { thinking: global } } } },
-        requesterAgentConfig: { subagents: { thinking: requester } },
-        targetAgentConfig: { subagents: { thinking: target } },
-        callerThinkingRaw: caller,
-      }),
-    ).toEqual({
-      status: "ok",
-      thinkingOverride: override,
-      initialSessionPatch: { thinkingLevel: expected },
-    });
-  });
+    {
+      name: "known model-default caller level is not persisted",
+      requester: undefined,
+      target: undefined,
+      global: undefined,
+      caller: "high",
+      callerExplicit: false,
+      expected: undefined,
+      override: undefined,
+    },
+    {
+      name: "explicit request over requester subagent default",
+      requester: "low",
+      target: "medium",
+      global: "high",
+      caller: "off",
+      requestOverride: "xhigh",
+      expected: "xhigh",
+      override: "xhigh",
+    },
+  ])(
+    "preserves $name",
+    ({
+      requester,
+      target,
+      global,
+      caller,
+      callerExplicit,
+      requestOverride,
+      expected,
+      override,
+    }) => {
+      expect(
+        resolveSubagentThinkingOverride({
+          cfg: { agents: { defaults: { subagents: { thinking: global } } } },
+          requesterAgentConfig: { subagents: { thinking: requester } },
+          targetAgentConfig: { subagents: { thinking: target } },
+          thinkingOverrideRaw: requestOverride,
+          callerThinkingRaw: caller,
+          callerThinkingExplicit: callerExplicit,
+        }),
+      ).toEqual({
+        status: "ok",
+        thinkingOverride: override,
+        initialSessionPatch: expected === undefined ? {} : { thinkingLevel: expected },
+      });
+    },
+  );
 });

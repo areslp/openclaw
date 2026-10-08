@@ -435,9 +435,17 @@ export function isOpenAICompletionsThinkingEnabled(effort: string): boolean {
  */
 export function resolveChatTemplateReasoningEffort(
   model: OpenAIModeModel,
-  reasoning: { effort: string | undefined; thinkingEnabled: boolean | undefined },
+  reasoning: {
+    effort: string | undefined;
+    thinkingEnabled: boolean | undefined;
+  },
 ): string | undefined {
-  return reasoning.thinkingEnabled && readCompatReasoningEfforts(model.compat)?.length
+  // SAFETY: Internal transport resolution adds this optional bit; the public input stays compatible.
+  const thinkingExplicit = (reasoning as typeof reasoning & { thinkingExplicit?: boolean })
+    .thinkingExplicit;
+  return reasoning.thinkingEnabled &&
+    thinkingExplicit !== false &&
+    readCompatReasoningEfforts(model.compat)?.length
     ? reasoning.effort
     : undefined;
 }

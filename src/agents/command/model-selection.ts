@@ -639,6 +639,9 @@ export async function resolveEmbeddedModelSelection(params: {
   });
   const sessionFile = resolvedSessionFile.sessionFile;
   sessionEntry = resolvedSessionFile.sessionEntry;
+  const thinkingIntent: { thinkingExplicit?: boolean } = {
+    thinkingExplicit: primaryConfiguredThinkLevel !== undefined,
+  };
 
   return {
     sessionEntry,
@@ -660,6 +663,7 @@ export async function resolveEmbeddedModelSelection(params: {
     ...(loadDeferredThinkingCatalog ? { loadDeferredThinkingCatalog } : {}),
     immutableThinkLevel,
     effectiveTurnThinkLevel: primaryThinking.requestedLevel,
+    ...thinkingIntent,
     sessionFile,
   };
 }

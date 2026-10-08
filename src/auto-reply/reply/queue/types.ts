@@ -271,6 +271,7 @@ export type FollowupRun = {
     /** Prepared model metadata reused when fallbacks revalidate the immutable thinking request. */
     thinkingCatalog?: ThinkingCatalogEntry[];
     thinkLevel?: ThinkLevel;
+    thinkingExplicit?: boolean;
     /** Original turn request; model retargeting changes only the effective thinkLevel. */
     readonly thinkLevelOverride?: ThinkLevel | "default";
     fastMode?: FastMode;

@@ -8,7 +8,7 @@ import {
 export function applyDirectCompletionsReasoningAndRouting(
   params: Record<string, unknown>,
   model: OpenAIModeModel,
-  reasoning: ReturnType<typeof resolveOpenAIRequestReasoning>,
+  reasoning: ReturnType<typeof resolveOpenAIRequestReasoning> & { thinkingExplicit?: boolean },
   compat: ResolvedOpenAICompletionsCompat,
 ): void {
   const nativeEffort = compat.thinkingFormat === "openrouter" ? undefined : reasoning.effort;

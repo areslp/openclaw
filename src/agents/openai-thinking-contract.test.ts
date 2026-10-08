@@ -202,6 +202,82 @@ describe("OpenAI thinking contract", () => {
     },
   );
 
+  it.each(
+    (["managed", "direct"] as const).flatMap((transport) =>
+      (
+        [
+          {
+            caseName: "known unselected thinking",
+            thinkingExplicit: false,
+            thinkingLevel: "high",
+            expectedEffort: undefined,
+            enabled: true,
+          },
+          {
+            caseName: "explicit configured default",
+            thinkingExplicit: true,
+            thinkingLevel: "high",
+            expectedEffort: "xhigh",
+            enabled: true,
+          },
+          {
+            caseName: "unknown provenance",
+            thinkingExplicit: undefined,
+            thinkingLevel: "high",
+            expectedEffort: "xhigh",
+            enabled: true,
+          },
+          {
+            caseName: "thinking off",
+            thinkingExplicit: true,
+            thinkingLevel: "off",
+            expectedEffort: undefined,
+            enabled: false,
+          },
+        ] as const
+      ).map((testCase) => Object.assign({ transport }, testCase)),
+    ),
+  )(
+    "applies Qwen template provenance for $caseName over $transport HTTP",
+    async ({ transport, thinkingExplicit, thinkingLevel, expectedEffort, enabled }) => {
+      const payload = await captureHttpProviderPayload({
+        api: "openai-completions",
+        thinkingFormat: "qwen-chat-template",
+        reasoningCompat: qwen38ChatTemplateEfforts,
+        transport,
+        thinkingLevel,
+        thinkingExplicit,
+        mode: "agent",
+      });
+      expect(payload).not.toHaveProperty("openclawThinkingExplicit");
+      expect(payload.chat_template_kwargs).toMatchObject({ enable_thinking: enabled });
+      if (expectedEffort) {
+        expect(payload.chat_template_kwargs).toMatchObject({ reasoning_effort: expectedEffort });
+      } else {
+        expect(payload).not.toHaveProperty("chat_template_kwargs.reasoning_effort");
+      }
+    },
+  );
+
+  it.each(["managed", "direct"] as const)(
+    "keeps non-Qwen scalar effort when provenance is false over %s HTTP",
+    async (transport) => {
+      const payload = await captureHttpProviderPayload({
+        api: "openai-completions",
+        reasoningCompat: {
+          supportsReasoningEffort: true,
+          supportedReasoningEfforts: ["low", "medium", "high"],
+        },
+        transport,
+        thinkingLevel: "high",
+        thinkingExplicit: false,
+        mode: "agent",
+      });
+      expect(payload.reasoning_effort).toBe("high");
+      expect(payload).not.toHaveProperty("chat_template_kwargs");
+    },
+  );
+
   it.each(["managed", "direct"] as const)(
     "omits declared chat-template effort when Agent thinking is off over %s HTTP",
     async (transport) => {
@@ -333,6 +409,7 @@ async function captureHttpProviderPayload(params: {
   api: "openai-completions" | "openai-responses";
   thinkingFormat?: "qwen" | "qwen-chat-template";
   reasoningCompat?: {
+    supportsReasoningEffort?: boolean;
     supportedReasoningEfforts?: string[];
     reasoningEffortMap?: Record<string, string>;
   };
@@ -340,6 +417,7 @@ async function captureHttpProviderPayload(params: {
   transport?: "managed" | "direct";
   thinkingLevelMap?: Model["thinkingLevelMap"];
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinkingExplicit?: boolean;
   reasoningSummary?: "auto";
   mode: "agent" | "standalone";
 }): Promise<Record<string, unknown>> {
@@ -382,11 +460,12 @@ async function captureHttpProviderPayload(params: {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128_000,
         maxTokens: 4_096,
-        ...(params.thinkingFormat
+        ...(params.thinkingFormat || params.reasoningCompat
           ? {
               compat: {
-                thinkingFormat: params.thinkingFormat,
-                ...(params.reasoningCompat ?? { supportsReasoningEffort: false }),
+                ...(params.thinkingFormat ? { thinkingFormat: params.thinkingFormat } : {}),
+                ...(params.reasoningCompat ??
+                  (params.thinkingFormat ? { supportsReasoningEffort: false } : {})),
               },
             }
           : {}),
@@ -404,9 +483,12 @@ async function captureHttpProviderPayload(params: {
       const streamFn: StreamFn = (requestModel, context, options) =>
         providerStream(requestModel, context, {
           ...options,
+          ...(params.thinkingExplicit !== undefined
+            ? { openclawThinkingExplicit: params.thinkingExplicit }
+            : {}),
           apiKey: "synthetic-test-key",
           ...(params.reasoningSummary ? { reasoningSummary: params.reasoningSummary } : {}),
-        });
+        } as SimpleStreamOptions & { openclawThinkingExplicit?: boolean });
       if (params.mode === "agent") {
         const agent = new Agent({
           initialState: { model, thinkingLevel: params.thinkingLevel },

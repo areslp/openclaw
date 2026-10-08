@@ -9,6 +9,7 @@ export function resolveSubagentThinkingOverride(params: {
   targetAgentConfig?: ResolvedAgentConfig;
   thinkingOverrideRaw?: string;
   callerThinkingRaw?: string;
+  callerThinkingExplicit?: boolean;
 }) {
   const resolvedThinkingDefaultRaw =
     normalizeOptionalString(params.requesterAgentConfig?.subagents?.thinking) ??
@@ -34,9 +35,10 @@ export function resolveSubagentThinkingOverride(params: {
     };
   }
 
-  const normalizedThinking = params.callerThinkingRaw
-    ? normalizeThinkLevel(params.callerThinkingRaw)
-    : undefined;
+  const normalizedThinking =
+    params.callerThinkingRaw && params.callerThinkingExplicit !== false
+      ? normalizeThinkLevel(params.callerThinkingRaw)
+      : undefined;
   return {
     status: "ok" as const,
     thinkingOverride: undefined,

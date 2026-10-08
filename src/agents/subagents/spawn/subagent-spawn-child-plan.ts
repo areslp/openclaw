@@ -149,8 +149,14 @@ export async function resolveSubagentChildPlan(params: {
   const targetAgentDir = resolveAgentDir(params.cfg, params.targetAgentId);
   const requesterAgentConfig = resolveAgentConfig(params.cfg, params.requesterAgentId);
   const targetAgentConfig = resolveAgentConfig(params.cfg, params.targetAgentId);
+  const requesterThinkingExplicit =
+    // SAFETY: Host tool construction adds this optional bit without changing the public context.
+    (params.ctx as SpawnSubagentContext & { requesterThinkingExplicit?: boolean })
+      .requesterThinkingExplicit;
+  const inheritedRequesterThinkingLevel =
+    requesterThinkingExplicit === false ? undefined : params.ctx.requesterThinkingLevel;
   const requesterPreferences =
-    params.ctx.requesterThinkingLevel === undefined ||
+    inheritedRequesterThinkingLevel === undefined ||
     (params.targetAgentId === params.requesterAgentId && !params.ctx.requesterModel)
       ? await readRequesterPreferences({
           cfg: params.cfg,
@@ -163,7 +169,16 @@ export async function resolveSubagentChildPlan(params: {
   // The active turn owns inherited effort; saved preferences may already describe
   // a later turn and cannot represent one-shot overrides.
   const callerThinkingRaw =
-    params.ctx.requesterThinkingLevel ?? requesterPreferences?.thinkingLevel;
+    inheritedRequesterThinkingLevel ??
+    (requesterThinkingExplicit === undefined && requesterPreferences?.thinkingExplicit
+      ? requesterPreferences.thinkingLevel
+      : undefined);
+  const callerThinkingExplicit =
+    inheritedRequesterThinkingLevel !== undefined
+      ? requesterThinkingExplicit
+      : requesterThinkingExplicit === undefined && requesterPreferences?.thinkingExplicit
+        ? true
+        : undefined;
   const modelPlan = await resolveSubagentModelAndThinkingPlan({
     cfg: params.cfg,
     targetAgentId: params.targetAgentId,
@@ -172,6 +187,7 @@ export async function resolveSubagentChildPlan(params: {
     modelOverride: params.request.model,
     thinkingOverrideRaw: params.request.thinking,
     callerThinkingRaw,
+    callerThinkingExplicit,
     inheritedModel:
       params.targetAgentId === params.requesterAgentId
         ? (params.ctx.requesterModel ?? requesterPreferences?.model)
