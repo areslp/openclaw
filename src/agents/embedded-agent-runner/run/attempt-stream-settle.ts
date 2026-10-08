@@ -424,28 +424,23 @@ export async function prepareEmbeddedAttemptTransport(input: {
   const auth = selectedAuth?.selectedAuthMode
     ? { mode: selectedAuth.selectedAuthMode, authFlow: selectedAuth.selectedAuthFlow }
     : undefined;
-  const preparedRuntimeExtraParams = attempt.runtimePlan?.transport.resolveExtraParams({
+  const extraParamsContext = {
     extraParamsOverride: streamExtraParamsOverride,
     thinkingLevel: input.providerThinkingLevel,
     agentId: input.sessionAgentId,
     workspaceDir: input.workspaceDir,
     model: attempt.model,
     resolvedTransport,
-  });
+  };
   const effectiveExtraParams =
-    preparedRuntimeExtraParams ??
+    attempt.runtimePlan?.transport.resolveExtraParams(extraParamsContext) ??
     resolvePreparedExtraParams({
+      ...extraParamsContext,
       cfg: attempt.config,
       provider: attempt.provider,
       modelId: attempt.modelId,
       providerRuntimeHandle: input.getProviderRuntimeHandle(),
-      extraParamsOverride: streamExtraParamsOverride,
-      thinkingLevel: input.providerThinkingLevel,
-      agentId: input.sessionAgentId,
       agentDir: input.agentDir,
-      workspaceDir: input.workspaceDir,
-      model: attempt.model,
-      resolvedTransport,
       auth,
     });
   const providerStreamFn = registerProviderStreamForModel({
@@ -503,7 +498,15 @@ export async function prepareEmbeddedAttemptTransport(input: {
     authStorage: attempt.authStorage,
     assertCurrent: assertRunCurrent,
   });
-  session.agent.streamFn = streamFn;
+  // A direct provider transport replaces the session SDK stream, so attach
+  // turn-owned thinking provenance to the selected transport as well.
+  session.agent.streamFn = (model, context, options) => {
+    const providerOptions = {
+      ...options,
+      openclawThinkingExplicit: attempt.thinkingExplicit,
+    };
+    return streamFn(model, context, providerOptions);
+  };
   // Install inside provider/config wrappers so their full onPayload chain runs
   // before admission hashes the request body that the built-in transport sends.
   session.agent.streamFn = wrapStreamFnWithProviderPromptState({

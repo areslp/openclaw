@@ -31,6 +31,8 @@ type ThinkingProvenanceCase = {
   requesterState: Readonly<Record<string, unknown>>;
   context: SpawnSubagentTestContext;
   requesterThinkingDefault?: string;
+  template?: "declared" | "undeclared";
+  spawnThinking?: string;
   expected?: string;
 };
 
@@ -78,10 +80,32 @@ const thinkingCases: readonly ThinkingProvenanceCase[] = [
     expected: "ultra",
   },
   {
-    name: "does not inherit a saved preference after a known model default",
+    name: "inherits the active automatic level instead of a stale saved preference",
     requesterState: { thinkingLevel: "medium" },
-    context: { requesterThinkingLevel: "ultra", requesterThinkingExplicit: false },
+    context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
+    expected: "high",
+  },
+  {
+    name: "keeps an unselected declared Qwen child at its template default",
+    requesterState: {},
+    context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
+    template: "declared",
     expected: undefined,
+  },
+  {
+    name: "inherits automatic thinking for an undeclared binary template",
+    requesterState: {},
+    context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
+    template: "undeclared",
+    expected: "high",
+  },
+  {
+    name: "preserves an explicit spawn override for a declared Qwen child",
+    requesterState: {},
+    context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
+    template: "declared",
+    spawnThinking: "low",
+    expected: "low",
   },
   {
     name: "inherits a persisted requester choice when active provenance is unknown",
@@ -134,13 +158,37 @@ describe("subagent thinking provenance", () => {
       },
     });
     hoisted.loadSessionStoreMock.mockReturnValue({ "agent:main:main": testCase.requesterState });
+    if (testCase.template) {
+      hoisted.prepareModelChoiceMock.mockImplementation(async (params) => {
+        const choice = await supportedSpawnModelChoice(params);
+        if (choice.kind !== "resolved") {
+          return choice;
+        }
+        return {
+          ...choice,
+          model: {
+            ...choice.model,
+            reasoning: true,
+            compat: {
+              thinkingFormat: "qwen-chat-template",
+              ...(testCase.template === "declared"
+                ? { supportedReasoningEfforts: ["low", "medium", "xhigh"] }
+                : {}),
+            },
+          },
+        };
+      });
+    }
     const readStore = captureStore();
 
-    const result = await spawn({ task: `provenance: ${testCase.name}` }, testCase.context);
+    const result = await spawn(
+      { task: `provenance: ${testCase.name}`, thinking: testCase.spawnThinking },
+      testCase.context,
+    );
 
     expect(result.status).toBe("accepted");
     expect(readStore()[result.childSessionKey!]?.thinkingLevel).toBe(testCase.expected);
-    expect(requireRecord(gatewayRequest("agent").params).thinking).toBe(undefined);
+    expect(requireRecord(gatewayRequest("agent").params).thinking).toBe(testCase.spawnThinking);
   });
 
   it("marks persisted requester thinking as explicit", async () => {

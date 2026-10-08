@@ -73,7 +73,6 @@ export async function resolveSubagentModelAndThinkingPlan(params: {
     targetAgentConfig: params.targetAgentConfig,
     thinkingOverrideRaw: params.thinkingOverrideRaw,
     callerThinkingRaw: params.callerThinkingRaw,
-    callerThinkingExplicit: params.callerThinkingExplicit,
   });
   if (thinkingPlan.status === "error") {
     const { provider, model } = splitModelRef(requestedModel);
@@ -125,6 +124,14 @@ export async function resolveSubagentModelAndThinkingPlan(params: {
     };
   }
   const resolvedModel = `${choice.ref.provider}/${choice.ref.model}`;
+  // Persisting an automatic parent tier makes the child treat it as selected.
+  // Only declared Qwen templates need omission to retain their server default.
+  const preserveTemplateDefault =
+    params.callerThinkingExplicit === false &&
+    thinkingPlan.thinkingOverride === undefined &&
+    choice.kind === "resolved" &&
+    choice.model.compat?.thinkingFormat === "qwen-chat-template" &&
+    (choice.model.compat.supportedReasoningEfforts?.length ?? 0) > 0;
   if (params.requiresTools && choice.kind === "resolved" && !supportsModelTools(choice.model)) {
     return {
       status: "error" as const,
@@ -171,7 +178,7 @@ export async function resolveSubagentModelAndThinkingPlan(params: {
             authProfileOverrideSource: "user" as const,
           }
         : {}),
-      ...thinkingPlan.initialSessionPatch,
+      ...(preserveTemplateDefault ? {} : thinkingPlan.initialSessionPatch),
       ...(params.fastMode !== undefined ? { fastMode: params.fastMode } : {}),
     } satisfies Partial<InternalSessionEntry>,
   };

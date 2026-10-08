@@ -11,10 +11,11 @@ import {
   resolveSpawnedWorkspaceInheritance,
 } from "../../spawned-context.js";
 import type { SubagentLaunchAuthorization } from "./subagent-launch-authorization.js";
-import type {
-  SpawnSubagentContext,
-  SpawnSubagentParams,
-  SpawnSubagentResult,
+import {
+  rejectSubagentSpawnRequest,
+  type SpawnSubagentContext,
+  type SpawnSubagentParams,
+  type SpawnSubagentResult,
 } from "./subagent-spawn-contract.js";
 import { resolveSubagentModelAndThinkingPlan } from "./subagent-spawn-plan.js";
 import {
@@ -50,21 +51,12 @@ export async function resolveSubagentChildPlan(params: {
       (requestedCwd &&
         (!requesterRoot || resolveUserPath(requestedCwd) !== resolveUserPath(requesterRoot))))
   ) {
-    return {
-      ok: false as const,
-      result: {
-        status: "forbidden",
-        error:
-          "This sender's helpers must keep the requester's workspace and session root. Omit cwd, projectId, and worktree.",
-      } satisfies SpawnSubagentResult,
-    };
+    return rejectSubagentSpawnRequest(
+      "forbidden",
+      "This sender's helpers must keep the requester's workspace and session root. Omit cwd, projectId, and worktree.",
+    );
   }
-  const toolSpawnMetadata = mapToolContextToSpawnedRunMetadata({
-    agentGroupId: params.ctx.agentGroupId,
-    agentGroupChannel: params.ctx.agentGroupChannel,
-    agentGroupSpace: params.ctx.agentGroupSpace,
-    workspaceDir: params.ctx.workspaceDir,
-  });
+  const toolSpawnMetadata = mapToolContextToSpawnedRunMetadata(params.ctx);
   const inheritedWorkspaceDir =
     params.targetAgentId !== params.requesterAgentId ? undefined : toolSpawnMetadata.workspaceDir;
   const spawnedWorkspaceDir = resolveSpawnedWorkspaceInheritance({
@@ -128,23 +120,16 @@ export async function resolveSubagentChildPlan(params: {
     sandbox: params.sandboxMode,
   });
   if (sandboxError) {
-    return {
-      ok: false as const,
-      result: { status: "forbidden", error: sandboxError } satisfies SpawnSubagentResult,
-    };
+    return rejectSubagentSpawnRequest("forbidden", sandboxError);
   }
   const spawnedWorkspaceCwd = spawnedWorkspaceDir
     ? resolveUserPath(spawnedWorkspaceDir)
     : undefined;
   if (childRuntimeSandboxed && spawnedCwd && spawnedCwd !== spawnedWorkspaceCwd) {
-    return {
-      ok: false as const,
-      result: {
-        status: "forbidden",
-        error:
-          "cwd override is not supported for sandboxed subagent runs; omit cwd or use the target agent workspace as cwd",
-      } satisfies SpawnSubagentResult,
-    };
+    return rejectSubagentSpawnRequest(
+      "forbidden",
+      "cwd override is not supported for sandboxed subagent runs; omit cwd or use the target agent workspace as cwd",
+    );
   }
   const targetAgentDir = resolveAgentDir(params.cfg, params.targetAgentId);
   const requesterAgentConfig = resolveAgentConfig(params.cfg, params.requesterAgentId);
@@ -153,15 +138,11 @@ export async function resolveSubagentChildPlan(params: {
     // SAFETY: Host tool construction adds this optional bit without changing the public context.
     (params.ctx as SpawnSubagentContext & { requesterThinkingExplicit?: boolean })
       .requesterThinkingExplicit;
-  const inheritedRequesterThinkingLevel =
-    requesterThinkingExplicit === false ? undefined : params.ctx.requesterThinkingLevel;
   const requesterPreferences =
-    inheritedRequesterThinkingLevel === undefined ||
+    params.ctx.requesterThinkingLevel === undefined ||
     (params.targetAgentId === params.requesterAgentId && !params.ctx.requesterModel)
       ? await readRequesterPreferences({
-          cfg: params.cfg,
-          requesterInternalKey: params.requesterInternalKey,
-          requesterAgentId: params.requesterAgentId,
+          ...params,
           assertActive: params.ctx.assertActive,
         })
       : undefined;
@@ -169,16 +150,11 @@ export async function resolveSubagentChildPlan(params: {
   // The active turn owns inherited effort; saved preferences may already describe
   // a later turn and cannot represent one-shot overrides.
   const callerThinkingRaw =
-    inheritedRequesterThinkingLevel ??
-    (requesterThinkingExplicit === undefined && requesterPreferences?.thinkingExplicit
-      ? requesterPreferences.thinkingLevel
-      : undefined);
+    params.ctx.requesterThinkingLevel ?? requesterPreferences?.thinkingLevel;
   const callerThinkingExplicit =
-    inheritedRequesterThinkingLevel !== undefined
+    params.ctx.requesterThinkingLevel !== undefined
       ? requesterThinkingExplicit
-      : requesterThinkingExplicit === undefined && requesterPreferences?.thinkingExplicit
-        ? true
-        : undefined;
+      : requesterPreferences?.thinkingExplicit;
   const modelPlan = await resolveSubagentModelAndThinkingPlan({
     cfg: params.cfg,
     targetAgentId: params.targetAgentId,
@@ -210,9 +186,7 @@ export async function resolveSubagentChildPlan(params: {
   const { resolvedModel } = modelPlan;
   if (params.swarmEnabled && params.request.fastMode === undefined) {
     const fastMode = await readRequesterFastMode({
-      cfg: params.cfg,
-      requesterInternalKey: params.requesterInternalKey,
-      requesterAgentId: params.requesterAgentId,
+      ...params,
       requesterModel: params.ctx.requesterModel,
       childModel: resolvedModel,
       assertActive: params.ctx.assertActive,
