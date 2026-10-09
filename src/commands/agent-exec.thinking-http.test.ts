@@ -5,6 +5,8 @@ import { withServer } from "openclaw/plugin-sdk/test-env";
 import { afterEach, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import "../test-utils/prepare-compiled-subprocesses.js";
+// Prepare the real lazy command graph before the turn's assertion deadline.
+import "../agents/agent-command.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db-lifecycle.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
 import { agentExecCommand } from "./agent-exec.js";
