@@ -1,3 +1,4 @@
+import { agentTabIconShape } from "../../../packages/gateway-protocol/src/schema/tab-icon.ts";
 import { resolveAgentAvatarUrl } from "../lib/avatar.ts";
 import { registerAvatarGatewayReset } from "../lib/identity-avatar-context.ts";
 import { resolveAvatarImageUrl, retainAvatarImageUrl } from "../lib/identity-avatar-loader.ts";
@@ -8,7 +9,7 @@ import { gatewayPresentationScope } from "./gateway-presentation-scope.ts";
 // Artwork consumes invalidation only, not payloads that some stores also publish.
 type ChangeSource = { subscribe: (listener: () => void) => () => void };
 
-/** Artwork follows explicit agent selection; the status owner remains independent. */
+/** Personal artwork follows its source; the status owner remains independent. */
 export function connectControlUiFaviconArtwork(context: {
   gateway: ApplicationContext["gateway"];
   theme: ChangeSource & {
@@ -24,6 +25,8 @@ export function connectControlUiFaviconArtwork(context: {
   let request = 0;
   let sourceKey = "";
   let avatarRevision = 0;
+  let lobsterRevision = 0;
+  let stopLobsterdex: (() => void) | undefined;
   let releaseImage = () => {};
 
   function retireImage() {
@@ -38,28 +41,34 @@ export function connectControlUiFaviconArtwork(context: {
     }
     const scope = gatewayPresentationScope(context.gateway);
     const mode = context.theme.settings.tabIcon ?? "default";
+    const shape = agentTabIconShape(mode);
+    const lobsterId = mode.startsWith("lobster:") ? mode.slice("lobster:".length) : null;
+    if (!lobsterId) {
+      stopLobsterdex?.();
+      stopLobsterdex = undefined;
+    }
     const agentId = context.agentSelection.state.selectedId;
     const agent = context.agents.state.agentsList?.agents.find((entry) => entry.id === agentId);
-    if (mode === "agent" && agentId && context.gateway.snapshot.phase === "connected") {
+    if (shape !== null && agentId && context.gateway.snapshot.phase === "connected") {
       void context.agentIdentity.ensure([agentId]);
     }
     const source =
-      mode === "agent" && agent
+      shape !== null && agent
         ? resolveAgentAvatarUrl(agent, context.agentIdentity.get(agentId))
         : null;
     const nextKey = JSON.stringify([
       scope.key,
       mode,
-      mode === "agent" ? agentId : null,
+      shape !== null ? agentId : null,
       source,
-      avatarRevision,
+      shape !== null ? avatarRevision : lobsterId ? lobsterRevision : null,
     ]);
     if (sourceKey === nextKey) {
       return;
     }
     sourceKey = nextKey;
     retireImage();
-    if (mode !== "agent" || !source) {
+    if (!lobsterId && (shape === null || !source)) {
       applyControlUiFaviconImage(null);
       return;
     }
@@ -68,6 +77,37 @@ export function connectControlUiFaviconArtwork(context: {
     const generation = request;
     const current = () =>
       !disposed && generation === request && scope === gatewayPresentationScope(context.gateway);
+    if (lobsterId) {
+      void Promise.all([
+        import("../components/lobster-favicon.ts"),
+        import("../components/lobster-dex.ts"),
+      ])
+        .then(([{ loadUnlockedLobsterFavicon }, { subscribeLobsterdex }]) => {
+          if (!current()) {
+            return null;
+          }
+          stopLobsterdex ??= subscribeLobsterdex(() => {
+            lobsterRevision += 1;
+            synchronize();
+          });
+          return loadUnlockedLobsterFavicon(lobsterId);
+        })
+        .then((image) => {
+          if (current()) {
+            applyControlUiFaviconImage(image);
+          }
+        })
+        .catch(() => {
+          if (current()) {
+            sourceKey = "";
+            applyControlUiFaviconImage(null);
+          }
+        });
+      return;
+    }
+    if (!source || shape === null) {
+      return;
+    }
     const resolved = source.startsWith("/") ? resolveAvatarImageUrl(source) : source;
     releaseImage = retainAvatarImageUrl(resolved);
     void Promise.resolve(resolved)
@@ -87,7 +127,7 @@ export function connectControlUiFaviconArtwork(context: {
         if (!image.naturalWidth || !image.naturalHeight) {
           throw new Error("Agent avatar has no dimensions");
         }
-        applyControlUiFaviconImage(image);
+        applyControlUiFaviconImage(image, shape);
       })
       .catch(() => {
         if (current()) {
@@ -101,12 +141,18 @@ export function connectControlUiFaviconArtwork(context: {
 
   const stops = [
     context.gateway.subscribe(synchronize),
-    context.theme.subscribe(synchronize),
+    context.theme.subscribe(() => {
+      // Theme publications include applied lazy palettes and system-mode changes,
+      // not just preference intent. Re-bake CSS-dependent artwork after either.
+      lobsterRevision += 1;
+      synchronize();
+    }),
     context.agents.subscribe(synchronize),
     context.agentIdentity.subscribe(synchronize),
     context.agentSelection.subscribe(synchronize),
     registerAvatarGatewayReset(() => {
       avatarRevision += 1;
+      sourceKey = "";
       retireImage();
       applyControlUiFaviconImage(null);
       // The avatar context publishes its new origin after notifying reset listeners.
@@ -116,6 +162,7 @@ export function connectControlUiFaviconArtwork(context: {
   synchronize();
   return () => {
     disposed = true;
+    stopLobsterdex?.();
     stops.forEach((stop) => stop());
     retireImage();
     applyControlUiFaviconImage(null);

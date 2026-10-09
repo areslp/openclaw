@@ -64,21 +64,16 @@ describe("runCodexAppServerAttempt dynamic tools", () => {
       stop: "abort",
     },
   ] as const)("$scenario", async ({ stop }) => {
-    const waitMs = 60_000;
     const abortController = new AbortController();
     const command = createRequiredExecRuntimeContract();
     const harness = createStartedThreadHarness();
     const params = createTestParams();
     params.abortSignal = abortController.signal;
-    if (stop !== "timeout") {
-      // The simulated native wait must fit inside the attempt's execution budget.
-      params.timeoutMs += waitMs;
-    }
     setCodexTestToolFactory(params, () => [{ ...command.tool, name: "sandbox_exec" }]);
     params.runtimePlan = createCodexRuntimePlanFixture();
     setCodexTestModelSupportsTools(params, true);
     const closeHost = await bindProductionHarnessHostCapabilitiesForTest(params);
-    // Protocol time belongs to this fixture; real host I/O must not spend its watchdog.
+    // Keep fixture I/O from spending the attempt clock before the command starts.
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const run = runCodexAppServerAttempt(params);
     let response: ReturnType<typeof callTool> | undefined;
@@ -93,6 +88,7 @@ describe("runCodexAppServerAttempt dynamic tools", () => {
       response = callTool(harness, "sandbox_exec", "required-command", {
         command: "verify-required",
         awaitResults: true,
+        yieldMs: 10,
       }).then((value) => {
         collected = true;
         return value;
@@ -106,6 +102,8 @@ describe("runCodexAppServerAttempt dynamic tools", () => {
           throw new Error("Attempt ended before native execution", { cause: result });
         }),
       ]);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(collected).toBe(false);
       expect(command.spawn).toHaveBeenCalledOnce();
       expect(harness.requests.filter(({ method }) => method === "turn/start")).toHaveLength(1);
       if (stop !== "complete") {
@@ -130,8 +128,6 @@ describe("runCodexAppServerAttempt dynamic tools", () => {
         expect(cancel).toHaveBeenCalledWith("manual-cancel");
         return;
       }
-      await vi.advanceTimersByTimeAsync(waitMs);
-      expect(collected).toBe(false);
       command.finish();
       await expect(response).resolves.toMatchObject({
         success: true,
@@ -147,10 +143,13 @@ describe("runCodexAppServerAttempt dynamic tools", () => {
       command.finish();
       try {
         await response;
-        await run;
       } finally {
-        closeHost();
-        command.close();
+        try {
+          await run;
+        } finally {
+          closeHost();
+          command.close();
+        }
       }
     }
   });
