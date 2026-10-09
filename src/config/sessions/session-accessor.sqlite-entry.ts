@@ -1,6 +1,5 @@
 import { isMainThread } from "node:worker_threads";
 import { normalizeInternalTurnContext } from "../../auto-reply/internal-turn-source.js";
-import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import { coerceRequiredSqliteNumber as sqliteNumber } from "../../infra/sqlite-number.js";
 import { OpenClawAgentDatabaseReadOnlyScope } from "../../state/openclaw-agent-db-readonly-scope.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
@@ -11,7 +10,6 @@ import {
   resolveOpenClawAgentSqlitePath,
   runOpenClawAgentWriteTransaction,
   withOpenClawAgentDatabaseRuntime,
-  type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { supportsOpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution.js";
 import { deriveLastRoutePatch, deriveSessionMetaPatch } from "./metadata.js";
@@ -48,7 +46,6 @@ import { prepareSessionIdentityPublication } from "./session-accessor.sqlite-ide
 import { kickSessionEntryMaintenanceAfterWrite } from "./session-accessor.sqlite-maintenance-kick.js";
 import { createFallbackSessionEntry } from "./session-accessor.sqlite-normalize.js";
 import {
-  getSessionKysely,
   resolveSqliteScope,
   resolveSqliteTranscriptArchiveDirectory,
   resolveSqliteTranscriptReadScope,
@@ -63,7 +60,7 @@ import {
   readWithCanonicalSessionReaderContinuation,
   type CanonicalSessionReaderContinuation,
 } from "./session-canonical-key.js";
-import { sessionEntryPatchPredicateMatches } from "./session-entry-patch-guard.js";
+import { readSessionEntryPatchPredicate } from "./session-entry-patch-guard.js";
 import {
   mergeSessionEntryPatch,
   reduceSessionEntryPatch,
@@ -73,12 +70,12 @@ import { captureSessionEntryPatchSource } from "./session-entry-patch-source.js"
 import { patchSessionEntryInWorker } from "./session-entry-patch.js";
 import type {
   SessionEntryPatchGuard,
-  SessionEntryPatchSelection,
+  SessionEntryPatchCommitted,
   SessionEntryUpdater,
   SqliteSessionEntryPatchOptions,
+  SqliteSessionEntrySnapshotPatchParams,
 } from "./session-entry-patch.types.js";
 import { buildSessionCreationStamp } from "./session-entry-provenance.js";
-import type { CapturedSessionEntryReadSource } from "./session-entry-read-source.types.js";
 import { kickSessionHistoryDiskBudgetMaintenance } from "./session-history-eviction.js";
 import { patchIncognitoSessionEntry } from "./session-incognito-entry-patch.js";
 import {
@@ -92,6 +89,7 @@ import { mergeSessionEntry } from "./types.js";
 export { loadSessionEntryForAdmission } from "./session-accessor.sqlite-entry-admission.js";
 export { ensureSessionEntrySync } from "./session-accessor.sqlite-initial-entry.js";
 export { listSessionEntriesReadOnly } from "./session-accessor.sqlite-entry-list.read.js";
+export { listSessionEntryKeysReadOnly } from "./session-retirement-read.js";
 export {
   loadExactSessionEntry,
   loadExactSessionEntryCandidates,
@@ -113,21 +111,6 @@ export function loadSessionEntryReadOnly(scope: SessionEntryReadScope): SessionE
 }
 
 export { loadSessionEntryReadOnlyResultInScope } from "./session-accessor.sqlite-exact-read.js";
-
-/** Lists persisted session keys without materializing their entry JSON. */
-export async function listSessionEntryKeysReadOnly(
-  scope: Partial<Omit<SessionAccessScope, "sessionKey">> = {},
-): Promise<string[]> {
-  const resolved = resolveSqliteScope({ ...scope, sessionKey: "" });
-  const result = withOpenClawAgentDatabaseReadOnly((database) => {
-    const db = getSessionKysely(database.db);
-    return executeSqliteQuerySync(
-      database.db,
-      db.selectFrom("session_nodes").select("session_key").orderBy("session_key"),
-    ).rows.map((row) => row.session_key);
-  }, toDatabaseOptions(resolved));
-  return result.found ? result.value : [];
-}
 
 /** Lists direct child rows without cloning or rebuilding the complete session store. */
 export function listSessionChildEntriesReadOnly(
@@ -381,19 +364,6 @@ async function patchSessionEntryTargetInScope(
   });
 }
 
-type SqliteSessionEntrySnapshotPatchParams = {
-  capturedSource?: CapturedSessionEntryReadSource;
-  operationLabel: "session-entry.patch" | "session-entry-target.patch";
-  validateCanonicalKeys: boolean;
-  options: SqliteSessionEntryPatchOptions;
-  selection: SessionEntryPatchSelection;
-  readSnapshot: (database: OpenClawAgentDatabase) => SqliteLifecycleTargetSnapshot;
-  resolved: ResolvedSqliteScope;
-  sessionKey: string;
-  storePath: string;
-  update: SessionEntryUpdater | SessionEntryPatchOperation;
-};
-
 /** Callback and fixed-operation patches share source custody, FIFO, and commit publication. */
 async function patchSqliteSessionEntrySnapshot(
   params: SqliteSessionEntrySnapshotPatchParams,
@@ -554,6 +524,7 @@ async function patchSqliteSessionEntrySnapshot(
         // The updater may dispose the prepared handle; re-admit before waiting for the write lock.
         return withDatabase(async () => {
           let result: SessionEntry | null = null;
+          let transcriptPredicate: SessionEntryPatchCommitted["transcriptPredicate"];
           const publish = await runOpenClawAgentWriteWithYieldingAdmission(
             (writeDatabase) => {
               assertCapturedSource(writeDatabase);
@@ -561,13 +532,12 @@ async function patchSqliteSessionEntrySnapshot(
               if (options.shouldCommit?.() === false) {
                 return undefined;
               }
-              if (
-                !sessionEntryPatchPredicateMatches(
-                  writeDatabase,
-                  sessionKey,
-                  options.workerGuard?.shouldCommitIf,
-                )
-              ) {
+              const predicate = readSessionEntryPatchPredicate(
+                writeDatabase,
+                sessionKey,
+                options.workerGuard?.shouldCommitIf,
+              );
+              if (!predicate.matches) {
                 return undefined;
               }
               const mutation = applySessionEntryPatchInDatabase(writeDatabase, {
@@ -587,6 +557,10 @@ async function patchSqliteSessionEntrySnapshot(
                 },
               });
               result = mutation.entry;
+              transcriptPredicate =
+                mutation.entry.sessionId === predicate.transcriptPredicate?.sessionId
+                  ? predicate.transcriptPredicate
+                  : undefined;
               if (!mutation.identity) {
                 return undefined;
               }
@@ -603,7 +577,12 @@ async function patchSqliteSessionEntrySnapshot(
           );
           try {
             if (next && result) {
-              options.onCommitted?.(structuredClone(result));
+              const entry = structuredClone(result);
+              if (transcriptPredicate) {
+                options.onCommitted?.(entry, transcriptPredicate);
+              } else {
+                options.onCommitted?.(entry);
+              }
             }
           } finally {
             publish?.();
