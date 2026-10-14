@@ -276,7 +276,7 @@ export function resolveCompletionsContextOutputBudget(
 export function buildOpenAICompletionsRequest(
   model: OpenAIModeModel,
   context: Context,
-  options: OpenAICompletionsOptions | undefined,
+  options: OpenAIThinkingProvenanceOptions | undefined,
   policy: CompletionsRequestPolicy,
 ): CompletionsRequest {
   let contextOutputCap: number | undefined;
@@ -454,7 +454,7 @@ export function buildOpenAICompletionsRequest(
         (usesBinaryOpenRouterThinking ? undefined : "high"));
   // Keep raw selection separate from the managed effort fallback.
   const thinkingExplicit =
-    (options as OpenAIThinkingProvenanceOptions | undefined)?.openclawThinkingExplicit ??
+    options?.openclawThinkingExplicit ??
     (options?.reasoningEffort !== undefined || options?.reasoning !== undefined);
   const reasoning = {
     ...resolveOpenAIRequestReasoning(model, requestedEffort, compat.reasoningEffortForOff),
