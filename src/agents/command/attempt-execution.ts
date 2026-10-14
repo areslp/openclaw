@@ -7,8 +7,7 @@ import {
   setChannelSourceTurnSameThreadRequired,
 } from "../../auto-reply/reply/source-turn-id.js";
 import { messageToolOwnsVisibleReply } from "../../auto-reply/source-reply-delivery-mode.js";
-import type { VerboseLevel } from "../../auto-reply/thinking.js";
-import { resolveCollapsedSessionAuthPinSource } from "../../config/sessions/auth-profile-override-provenance.js";
+import type { ThinkLevel, VerboseLevel } from "../../auto-reply/thinking.js";
 import type { SessionTranscriptRuntimeTarget } from "../../config/sessions/session-accessor.js";
 import { readSessionEntryInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
@@ -47,14 +46,16 @@ import {
   resolveCliSessionClearReason,
   shouldClearFailedCliSessionBinding,
 } from "../cli-session.js";
-import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
+import { prepareConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import { resolveConversationToolPolicies } from "../conversation-tool-policy-pipeline.js";
 import { resolveDelegationCapability } from "../delegation-capability.js";
 import { withAdmittedCliCandidate } from "../embedded-agent-runner/run-entry-cli.js";
 import { resolveRunEntryCliRuntime } from "../embedded-agent-runner/run-entry-runtime.js";
+import type { RunEntryCandidateOptions } from "../embedded-agent-runner/run-entry.js";
 import { mergeForcedEmbeddedAttemptToolsAllow } from "../embedded-agent-runner/run/attempt-tool-construction-plan.js";
 import type { DeferredEmbeddedRunLifecycleManager } from "../embedded-agent-runner/run/deferred-lifecycle-owner.js";
 import type { RunEmbeddedAgentInternalParams } from "../embedded-agent-runner/run/internal-params.js";
+import { resolveWebchatPromptCacheKey } from "../embedded-agent-runner/run/session-boundary-prompt-cache-key.js";
 import { runEmbeddedAgent, type EmbeddedAgentRunResult } from "../embedded-agent.js";
 import { resolveAvailableAgentHarnessPolicy } from "../harness/selection.js";
 import { buildAgentInternalEventContext as buildEventContext } from "../internal-events.js";
@@ -73,9 +74,13 @@ import {
   isSubagentAnnounceCompletionHandoff,
   isTrustedSubagentCompletionHandoffForRun,
 } from "../subagents/announce/subagent-announce-handoff.js";
+import { withPreparedSessionCapabilityRead } from "../subagents/spawn/subagent-session-store.js";
 import { isRuntimeToolAllowed, isToolAllowedByPolicies } from "../tool-policy-match.js";
 import { DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS } from "../tool-result-limits.js";
-import { resolveHarnessAuthProfileSelection } from "./attempt-auth-selection.js";
+import {
+  resolveCommandAuthProfileSelection,
+  resolveHarnessAuthProfileSelection,
+} from "./attempt-auth-selection.js";
 import { emitAgentAttemptRuntimeStart } from "./attempt-callbacks.js";
 import {
   buildClaudeCliFallbackContextPrelude,
@@ -86,86 +91,75 @@ import {
   resolveFallbackRetryPrompt,
   rebaseExecApprovalContinuationPromptRange,
 } from "./attempt-execution.helpers.js";
-import { runThinkingOptions, type AttemptOptions } from "./attempt-thinking.js";
 import type { AgentCommandOpts, AgentRunContext } from "./types.js";
 
 const log = createSubsystemLogger("agents/agent-command");
 
-export function runAgentAttempt(
-  params: AttemptOptions & {
-    preparedRunAdmission: PreparedAgentRunAdmission;
-    providerOverride: string;
-    modelOverride: string;
-    modelHasVision?: boolean;
-    modelThinkingCapability?: RunEmbeddedAgentInternalParams["modelThinkingCapability"];
-    configuredAuthProfileId?: string;
-    originalProvider: string;
-    cfg: OpenClawConfig;
-    sessionEntry: SessionEntry | undefined;
-    sessionId: string;
-    sessionKey: string | undefined;
-    sessionTarget?: SessionTranscriptRuntimeTarget;
-    sessionAgentId: string;
-    sessionFile: string;
-    workspaceDir: string;
-    cwd?: string;
-    body: string;
-    transcriptBody?: string;
-    preserveCliSessionBinding?: boolean;
-    fastMode?: FastMode;
-    fastModeStartedAtMs?: number;
-    fastModeAutoOnSeconds?: number;
-    timeoutMs: number;
-    runTimeoutOverrideMs?: number;
-    runId: string;
-    lifecycleGeneration: string;
-    opts: AgentCommandOpts;
-    runContext: AgentRunContext;
-    spawnedBy: string | undefined;
-    messageChannel: ReturnType<typeof resolveMessageChannel>;
-    skillsSnapshot: SkillSnapshot | undefined;
-    resolvedVerboseLevel: VerboseLevel | undefined;
-    agentDir: string;
-    onAgentEvent: (evt: {
-      stream: string;
-      data?: Record<string, unknown>;
-      sessionKey?: string;
-    }) => void | Promise<void>;
-    deferTerminalLifecycle?: boolean;
-    deferredLifecycle?: DeferredEmbeddedRunLifecycleManager;
-    authProfileProvider: string;
-    sessionStore?: Record<string, SessionEntry>;
-    storePath?: string;
-    pluginsEnabled?: boolean;
-    metadataSnapshot?: PluginMetadataSnapshot;
-    pluginGeneration: PreparedModelRuntimePluginGeneration | undefined;
-    modelFallbacksOverride?: string[];
-    sessionHasHistory?: boolean;
-    fallbackRuntimeState?: { originRuntime?: "cli" | "embedded" };
-    suppressPromptPersistenceOnRetry?: boolean;
-    userTurnTranscriptRecorder?: UserTurnTranscriptRecorder;
-    onUserMessagePersisted?: (message: Extract<AgentMessage, { role: "user" }>) => void;
-    onLifecycleGenerationChanged?: (lifecycleGeneration: string) => void;
-    onCompactionAccounting?: RunEmbeddedAgentInternalParams["onCompactionAccounting"];
-    onCompactionRequestBudget?: RunEmbeddedAgentInternalParams["onCompactionRequestBudget"];
-    onSuccessfulAuthProfile?: (selection: {
-      authProfileId?: string;
-      authProfileIdSource?: "auto" | "user";
-    }) => void;
-  },
+export async function runAgentAttempt(
+  params: Pick<RunEntryCandidateOptions, "isFallbackRetry" | "modelRoutingProvenance"> &
+    Partial<Omit<RunEntryCandidateOptions, "isFallbackRetry" | "modelRoutingProvenance">> & {
+      preparedRunAdmission: PreparedAgentRunAdmission;
+      providerOverride: string;
+      modelOverride: string;
+      modelHasVision?: boolean;
+      modelThinkingCapability?: RunEmbeddedAgentInternalParams["modelThinkingCapability"];
+      configuredAuthProfileId?: string;
+      originalProvider: string;
+      cfg: OpenClawConfig;
+      sessionEntry: SessionEntry | undefined;
+      sessionId: string;
+      sessionKey: string | undefined;
+      sessionTarget?: SessionTranscriptRuntimeTarget;
+      sessionAgentId: string;
+      sessionFile: string;
+      workspaceDir: string;
+      cwd?: string;
+      body: string;
+      transcriptBody?: string;
+      preserveCliSessionBinding?: boolean;
+      resolvedThinkLevel: ThinkLevel;
+      thinkingExplicit?: boolean;
+      fastMode?: FastMode;
+      fastModeStartedAtMs?: number;
+      fastModeAutoOnSeconds?: number;
+      timeoutMs: number;
+      runTimeoutOverrideMs?: number;
+      runId: string;
+      lifecycleGeneration: string;
+      opts: AgentCommandOpts;
+      runContext: AgentRunContext;
+      spawnedBy: string | undefined;
+      messageChannel: ReturnType<typeof resolveMessageChannel>;
+      skillsSnapshot: SkillSnapshot | undefined;
+      resolvedVerboseLevel: VerboseLevel | undefined;
+      agentDir: string;
+      onAgentEvent: (evt: {
+        stream: string;
+        data?: Record<string, unknown>;
+        sessionKey?: string;
+      }) => void | Promise<void>;
+      deferTerminalLifecycle?: boolean;
+      deferredLifecycle?: DeferredEmbeddedRunLifecycleManager;
+      authProfileProvider: string;
+      sessionStore?: Record<string, SessionEntry>;
+      storePath?: string;
+      pluginsEnabled?: boolean;
+      metadataSnapshot?: PluginMetadataSnapshot;
+      pluginGeneration: PreparedModelRuntimePluginGeneration | undefined;
+      sessionHasHistory?: boolean;
+      fallbackRuntimeState?: { originRuntime?: "cli" | "embedded" };
+      suppressPromptPersistenceOnRetry?: boolean;
+      userTurnTranscriptRecorder?: UserTurnTranscriptRecorder;
+      onUserMessagePersisted?: (message: Extract<AgentMessage, { role: "user" }>) => void;
+      onLifecycleGenerationChanged?: (lifecycleGeneration: string) => void;
+      onCompactionAccounting?: RunEmbeddedAgentInternalParams["onCompactionAccounting"];
+      onCompactionRequestBudget?: RunEmbeddedAgentInternalParams["onCompactionRequestBudget"];
+      onSuccessfulAuthProfile?: (
+        selection: Pick<RunEmbeddedAgentInternalParams, "authProfileId" | "authProfileIdSource">,
+      ) => void;
+    },
 ) {
-  const sessionAuthProfileId = params.sessionEntry?.authProfileOverride?.trim();
-  const sessionAuthProfileSource = resolveCollapsedSessionAuthPinSource(params.sessionEntry);
-  // An explicit session choice owns the conversation. Otherwise the profile
-  // bound to the configured model replaces a stale automatic session choice.
-  const selectedAuthProfile =
-    sessionAuthProfileId && sessionAuthProfileSource !== "auto"
-      ? { id: sessionAuthProfileId, source: sessionAuthProfileSource }
-      : params.configuredAuthProfileId?.trim()
-        ? { id: params.configuredAuthProfileId.trim(), source: "user" as const }
-        : sessionAuthProfileId
-          ? { id: sessionAuthProfileId, source: sessionAuthProfileSource }
-          : undefined;
+  const selectedAuthProfile = resolveCommandAuthProfileSelection(params);
   const isRawModelRun = params.opts.modelRun === true || params.opts.promptMode === "none";
   // A completion handoff relays frozen child output, so only a verified private
   // capability plus persisted requester lineage may restore its tool surface.
@@ -184,15 +178,17 @@ export function runAgentAttempt(
   });
   const trustedSubagentCompletionHandoff =
     exactSubagentCompletionHandoff &&
-    hasVerifiedRequesterCompletionHandoff({
-      config: params.cfg,
-      sessionKey: params.sessionKey,
-      inputProvenance: params.opts.inputProvenance,
-      trustedInternalHandoff: params.opts.trustedInternalHandoff,
-      sessionId: params.sessionId,
-      modelProvider: params.providerOverride,
-      modelId: params.modelOverride,
-    });
+    (await withPreparedSessionCapabilityRead(() =>
+      hasVerifiedRequesterCompletionHandoff({
+        config: params.cfg,
+        sessionKey: params.sessionKey,
+        inputProvenance: params.opts.inputProvenance,
+        trustedInternalHandoff: params.opts.trustedInternalHandoff,
+        sessionId: params.sessionId,
+        modelProvider: params.providerOverride,
+        modelId: params.modelOverride,
+      }),
+    ));
   const trustedSubagentAnnounceHandoff =
     isSubagentAnnounceHandoff && trustedSubagentCompletionHandoff;
   const completionRequestsMessageDelivery =
@@ -205,10 +201,11 @@ export function runAgentAttempt(
         cfg: params.cfg,
         sessionKey: params.sessionKey,
         agentId: params.sessionAgentId,
+        preparedSessionEntry: params.sessionEntry ?? null,
       })
     : undefined;
   const completionCapabilityProfile = completionRequestsMessageDelivery
-    ? resolveConversationCapabilityProfile({
+    ? await prepareConversationCapabilityProfile({
         config: params.cfg,
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,
@@ -245,7 +242,7 @@ export function runAgentAttempt(
     params.isFallbackRetry &&
     isClaudeCliProvider(params.originalProvider) &&
     !isClaudeCliProvider(params.providerOverride)
-      ? buildClaudeCliFallbackContextPrelude({
+      ? await buildClaudeCliFallbackContextPrelude({
           cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
         })
       : "";
@@ -274,9 +271,6 @@ export function runAgentAttempt(
   );
   const requestedAgentHarnessId = isRawModelRun ? "openclaw" : undefined;
   const sessionRuntimeOverride = isRawModelRun ? undefined : params.agentHarnessRuntimeOverride;
-  const pinnedHarnessId = isRawModelRun
-    ? undefined
-    : resolveSessionPinnedHarnessId(params.sessionEntry);
   const { cliExecutionProvider, useCliExecution: isCliExecutionProvider } = isRawModelRun
     ? {
         cliExecutionProvider: params.providerOverride,
@@ -289,7 +283,7 @@ export function runAgentAttempt(
         agentId: params.sessionAgentId,
         authProfileId: selectedAuthProfile?.id,
         sessionRuntimeOverride,
-        pinnedHarnessId,
+        pinnedHarnessId: resolveSessionPinnedHarnessId(params.sessionEntry),
       });
   const { completionRetainsRequesterTools, runtimeToolsAllow, disableTools } =
     resolveCompletionToolPolicy({
@@ -364,7 +358,7 @@ export function runAgentAttempt(
     providerAuthAliasesEnabled: params.pluginsEnabled,
     allowHarnessAuthProfileForwarding: !isCliExecutionProvider,
   };
-  const harnessAuthSelection = resolveHarnessAuthProfileSelection({
+  const harnessAuthSelection = await resolveHarnessAuthProfileSelection({
     ...harnessAuthContext,
     agentDir: params.agentDir,
     authProfileProvider: params.authProfileProvider,
@@ -377,7 +371,7 @@ export function runAgentAttempt(
     authProfileMode: harnessAuthSelection.authProfileMode,
     sessionAuthProfileId: harnessAuthSelection.authProfileId,
   });
-  // Explicit pins keep synchronous validation; automatic selection needs the admitted binding.
+  // Automatic selection needs the admitted session binding; explicit pins do not.
   const cliAuthNeedsSessionBinding =
     allowCliAuthProfileForwarding &&
     !isRawModelRun &&
@@ -391,7 +385,7 @@ export function runAgentAttempt(
   });
   const authProfileId =
     allowCliAuthProfileForwarding && !cliAuthNeedsSessionBinding
-      ? resolveCliExecutionAuthProfileId(buildCliAuthContext())
+      ? await resolveCliExecutionAuthProfileId(buildCliAuthContext())
       : runtimeAuthPlan.forwardedAuthProfileId;
   const embeddedAgentProvider = resolveOpenAIRuntimeProvider({
     provider: params.providerOverride,
@@ -416,6 +410,16 @@ export function runAgentAttempt(
       sessionId: params.sessionId,
       sessionKey: params.sessionKey,
       sessionTarget: params.sessionTarget,
+      // Internal continuations keep the affinity of the persisted webchat conversation.
+      promptCacheKey:
+        params.sessionEntry?.delivery?.kind === "internal" && params.sessionKey
+          ? resolveWebchatPromptCacheKey({
+              agentId: params.sessionAgentId,
+              provider: params.providerOverride,
+              model: params.modelOverride,
+              sessionKey: params.sessionKey,
+            })
+          : undefined,
       chatType: params.sessionEntry?.chatType,
       contextWindow: params.sessionEntry?.contextWindow,
       agentId: params.sessionAgentId,
@@ -424,10 +428,12 @@ export function runAgentAttempt(
       workspaceDir: params.workspaceDir,
       cwd: params.cwd,
       config: params.cfg,
+      toolOverrides: params.sessionEntry?.toolOverrides,
       modelHasVision: params.modelHasVision,
       model: params.modelOverride,
       modelRoutingProvenance: params.modelRoutingProvenance,
-      ...runThinkingOptions(params.resolvedThinkLevel, params.thinkingExplicit),
+      thinkLevel: params.resolvedThinkLevel,
+      thinkingExplicit: params.thinkingExplicit,
       fastMode: params.fastMode,
       fastModeStartedAtMs: params.fastModeStartedAtMs,
       fastModeAutoOnSeconds: params.fastModeAutoOnSeconds,
@@ -459,7 +465,10 @@ export function runAgentAttempt(
       suppressNextUserMessagePersistence: params.suppressPromptPersistenceOnRetry === true,
       disableTools,
       terminalReplyExpectation: replyExpectation,
-      silentReplyPromptMode: replyExpectation === "required" ? "none" : undefined,
+      silentReplyPromptMode:
+        params.opts.silentReplyPromptMode ?? (replyExpectation === "required" ? "none" : undefined),
+      bootstrapContextMode: params.opts.bootstrapContextMode,
+      bootstrapContextRunKind: params.opts.bootstrapContextRunKind,
       bootstrapPromptWarningSignaturesSeen,
       bootstrapPromptWarningSignature: bootstrapPromptWarningSignaturesSeen.at(-1),
     }) satisfies Partial<RunEmbeddedAgentInternalParams>;
@@ -499,7 +508,7 @@ export function runAgentAttempt(
       async ({ sessionEntry, cliSessionBinding, assertSettlementCurrent, settleResult }) => {
         params.sessionEntry = sessionEntry;
         const cliAuthProfileId = cliAuthNeedsSessionBinding
-          ? resolveCliExecutionAuthProfileId({
+          ? await resolveCliExecutionAuthProfileId({
               ...buildCliAuthContext(),
               sessionBinding: cliSessionBinding,
             })
@@ -773,10 +782,9 @@ export function runAgentAttempt(
     messageThreadId: params.opts.threadId,
     hasRepliedRef: params.runContext.hasRepliedRef,
     permissionMode: params.sessionEntry?.permissionMode,
-    toolOverrides: params.sessionEntry?.toolOverrides,
     sessionRoot: params.sessionEntry?.sessionRoot,
     ...(params.pluginGeneration ? { pluginGeneration: params.pluginGeneration } : {}),
-    agentHarnessId: pinnedHarnessId,
+    agentHarnessId: isRawModelRun ? undefined : resolveSessionPinnedHarnessId(params.sessionEntry),
     modelSelectionLocked: !isRawModelRun && params.sessionEntry?.modelSelectionLocked === true,
     agentHarnessRuntimeOverride: embeddedAgentHarnessOverride,
     agentHarnessRuntimePreparationHint:
@@ -790,6 +798,7 @@ export function runAgentAttempt(
     toolBindings: params.opts.toolBindings,
     provider: embeddedAgentProvider,
     requestedRouteResolution: "resolved",
+    resolvedModelSelection: params.resolvedModelSelection,
     modelThinkingCapability: params.modelThinkingCapability,
     modelFallbacksOverride: params.modelFallbacksOverride,
     authProfileId,
@@ -803,8 +812,6 @@ export function runAgentAttempt(
     suppressLiveStreamOutput:
       params.opts.sessionEffects === "internal" && params.opts.deliver !== true,
     abortSignal: params.opts.abortSignal,
-    bootstrapContextMode: params.opts.bootstrapContextMode,
-    bootstrapContextRunKind: params.opts.bootstrapContextRunKind,
     toolsAllow: runtimeToolsAllow,
     runtimePluginToolGrant: params.opts.runtimePluginToolGrant,
     trustedInternalHandoff: trustedSubagentCompletionHandoff

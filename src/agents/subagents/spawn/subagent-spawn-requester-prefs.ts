@@ -1,3 +1,4 @@
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { SessionEntry } from "../../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { FastMode } from "../../../shared/fast-mode.js";
@@ -12,34 +13,15 @@ import {
   resolveConfiguredThinkingDefault,
   resolveThinkingDefault,
 } from "../../model-thinking-default.js";
-import { resolveGatewaySessionStoreTargetInWorker } from "./subagent-spawn.runtime.js";
 
 type RequesterPreferencesContext = {
   cfg: OpenClawConfig;
-  requesterInternalKey: string;
   requesterAgentId?: string;
-  assertActive?: () => void;
+  requesterEntry: SessionEntry | undefined;
 };
 
-async function readRequesterSession(
-  params: RequesterPreferencesContext,
-): Promise<SessionEntry | undefined> {
-  try {
-    const target = await resolveGatewaySessionStoreTargetInWorker({
-      cfg: params.cfg,
-      key: params.requesterInternalKey,
-      agentId: params.requesterAgentId,
-      assertActive: params.assertActive,
-    });
-    return target.store[target.canonicalKey];
-  } catch {
-    return undefined;
-  } finally {
-    params.assertActive?.();
-  }
-}
-
-function resolveRequesterModel(params: RequesterPreferencesContext, entry?: SessionEntry) {
+function resolveRequesterModel(params: RequesterPreferencesContext) {
+  const entry = params.requesterEntry;
   const defaultModel = resolveDefaultModelForAgent({
     cfg: params.cfg,
     agentId: params.requesterAgentId,
@@ -63,48 +45,33 @@ function resolveRequesterModel(params: RequesterPreferencesContext, entry?: Sess
   return { defaultModel, selectedModel };
 }
 
-export async function readRequesterPreferences(params: RequesterPreferencesContext) {
-  const entry = await readRequesterSession(params);
-  params.assertActive?.();
-  const { defaultModel, selectedModel } = resolveRequesterModel(params, entry);
+export function resolveRequesterPreferences(params: RequesterPreferencesContext) {
+  const entry = params.requesterEntry;
+  const { defaultModel, selectedModel } = resolveRequesterModel(params);
   const model = selectedModel ?? defaultModel;
-  const persistedThinkingLevel =
-    typeof entry?.thinkingLevel === "string" && entry.thinkingLevel.trim()
-      ? entry.thinkingLevel.trim()
-      : undefined;
-  const configuredThinkingLevel =
-    persistedThinkingLevel === undefined
-      ? resolveConfiguredThinkingDefault({
-          cfg: params.cfg,
-          agentId: params.requesterAgentId,
-          provider: model.provider,
-          model: model.model,
-        })
-      : undefined;
-  const thinkingLevel =
-    persistedThinkingLevel ??
-    configuredThinkingLevel ??
-    resolveThinkingDefault({
-      cfg: params.cfg,
-      agentId: params.requesterAgentId,
-      provider: model.provider,
-      model: model.model,
-    });
+  const thinkingParams = {
+    cfg: params.cfg,
+    agentId: params.requesterAgentId,
+    provider: model.provider,
+    model: model.model,
+  };
+  const selectedThinkingLevel =
+    normalizeOptionalString(entry?.thinkingLevel) ??
+    resolveConfiguredThinkingDefault(thinkingParams);
   return {
     model: selectedModel ?? undefined,
-    thinkingLevel,
-    thinkingExplicit: persistedThinkingLevel !== undefined || configuredThinkingLevel !== undefined,
+    thinkingLevel: selectedThinkingLevel ?? resolveThinkingDefault(thinkingParams),
+    thinkingExplicit: selectedThinkingLevel !== undefined,
   };
 }
 
-export async function readRequesterFastMode(
+export function resolveRequesterFastMode(
   params: RequesterPreferencesContext & { requesterModel?: ModelRef; childModel: string },
-): Promise<FastMode | undefined> {
-  const entry = await readRequesterSession(params);
-  params.assertActive?.();
+): FastMode | undefined {
+  const entry = params.requesterEntry;
   let model = params.requesterModel;
   if (!model) {
-    const { defaultModel, selectedModel } = resolveRequesterModel(params, entry);
+    const { defaultModel, selectedModel } = resolveRequesterModel(params);
     model = selectedModel ?? defaultModel;
   }
   if (params.childModel !== `${model.provider}/${model.model}`) {

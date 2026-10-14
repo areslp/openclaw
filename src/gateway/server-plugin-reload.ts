@@ -97,6 +97,17 @@ export async function reloadGatewayPlugins(
   const previousMetadata = runtime.pluginMetadataSnapshot;
   const previousLoadContext = getPluginRuntimeLoadContext(previousRegistry);
   const recovery = createPluginReloadRecovery(previousRegistry, preparePlugins);
+  const sharedLoadParams = {
+    workspaceDir: pluginWorkspaceDir,
+    log,
+    coreGatewayMethodNames,
+    hostServices: pluginHostServices,
+    baseMethods,
+    ambientEnvTriggers,
+    resolveGatewayContext: resolvePluginGatewayContext,
+    loadIntent: "replacement" as const,
+    previousRegistry,
+  };
 
   const cache = createPluginCache();
   const operationId = params.pluginLifecycle?.operationId ?? randomUUID();
@@ -114,16 +125,16 @@ export async function reloadGatewayPlugins(
   let committed = false;
   let restored = false;
   let candidateServices: PluginServicesHandle | undefined;
-  let loaded: ReturnType<typeof PluginBootstrap.prepareGatewayPluginLoad> | undefined;
+  let loaded: Awaited<ReturnType<typeof PluginBootstrap.prepareGatewayPluginLoad>> | undefined;
   let decisionReplacement: ReturnType<typeof prepareDecisionProviderReload> | undefined;
   let memoryReplacement: ReturnType<typeof prepareMemoryRuntimeReload> | undefined;
   const changedPluginIds = new Set(replacePluginIds);
   let resourceHandoffIds = new Set<string>();
+  let releaseResourceHandoff: (() => void) | undefined;
   const sidecarReplacements: ReturnType<
     NonNullable<GatewayPostReadySidecarHandle["preparePluginReload"]>
   >[] = [];
   let rollbackConfigEffects: (() => Promise<void>) | undefined;
-  let releaseResourceHandoff: (() => void) | undefined;
   const channels = createPluginReloadChannels({
     channelManager,
     previousRegistry,
@@ -139,7 +150,7 @@ export async function reloadGatewayPlugins(
     isBlockingStopError,
     rethrowServiceStopTimeout,
     includeServiceStopFailure,
-    reserveResourceHandoff,
+    assertResourceHandoff,
     selectResourceHandoff,
     drainInstances,
     drainMemory,
@@ -217,25 +228,17 @@ export async function reloadGatewayPlugins(
       }),
     );
     const loadParams = {
+      ...sharedLoadParams,
       cfg: params.nextConfig,
       activationSourceConfig: params.sourceConfig,
-      workspaceDir: pluginWorkspaceDir,
-      log,
-      coreGatewayMethodNames,
-      hostServices: pluginHostServices,
-      baseMethods,
       pluginLookUpTable: lookup,
       pluginMetadataSnapshot: nextMetadata,
-      ambientEnvTriggers,
-      resolveGatewayContext: resolvePluginGatewayContext,
-      loadIntent: "replacement" as const,
-      previousRegistry,
       replacePluginIds,
       expectedSourceDigests: params.pluginLifecycle?.expectedSourceDigests,
       prepareRegistrationFailureCleanup: prepareRegistrationFailureCleanup(params.nextConfig),
       env: params.env,
     };
-    const preflight = withPluginCache(cache, () =>
+    const preflight = await withPluginCache(cache, () =>
       preparePlugins({ ...loadParams, loadModules: false }),
     );
     preflight.retireGatewayRuntimeBindings();
@@ -247,8 +250,8 @@ export async function reloadGatewayPlugins(
       recordWarning(warning);
     }
     await checkpoint();
-    // Reserve and gate new model runs atomically; admitted runs keep their callbacks until settled.
-    releaseResourceHandoff = reserveResourceHandoff(resourceHandoffIds);
+    // Refuse self-reload before stopping the plugin whose callback must finish this request.
+    releaseResourceHandoff = assertResourceHandoff(resourceHandoffIds);
     const configEffects = params.prepareConfigEffects({
       pluginIds: changedPluginIds,
       channels: channelTargets,
@@ -329,7 +332,7 @@ export async function reloadGatewayPlugins(
     }
     await checkpoint();
     phase = "activate";
-    loaded = withPluginCache(cache, () => preparePlugins(loadParams));
+    loaded = await withPluginCache(cache, () => preparePlugins(loadParams));
     nextRegistry = loaded.pluginRegistry;
     const { resolvedConfig } = loaded;
     const activationCleanup: Promise<void>[] = [];
@@ -518,7 +521,9 @@ export async function reloadGatewayPlugins(
         !previousCleanupFailed
       ) {
         const recoveryErrors: unknown[] = [];
-        let recovered: ReturnType<typeof PluginBootstrap.prepareGatewayPluginLoad> | undefined;
+        let recovered:
+          | Awaited<ReturnType<typeof PluginBootstrap.prepareGatewayPluginLoad>>
+          | undefined;
         let recoveredServices: PluginServicesHandle | undefined;
         let recoveryPublished = false;
         try {
@@ -537,21 +542,13 @@ export async function reloadGatewayPlugins(
               );
             }
             await disposeInstances(previousRegistry, changedPluginIds);
-            recovered = recovery.prepare(
+            recovered = await recovery.prepare(
               {
+                ...sharedLoadParams,
                 cfg: previousConfig,
                 activationSourceConfig:
                   previousLoadContext?.activationSourceConfig ?? previousConfig,
-                workspaceDir: pluginWorkspaceDir,
-                log,
-                coreGatewayMethodNames,
-                hostServices: pluginHostServices,
-                baseMethods,
                 pluginMetadataSnapshot: previousMetadata,
-                ambientEnvTriggers,
-                resolveGatewayContext: resolvePluginGatewayContext,
-                loadIntent: "replacement",
-                previousRegistry,
                 replacePluginIds: changedPluginIds,
                 prepareRegistrationFailureCleanup:
                   prepareRegistrationFailureCleanup(previousConfig),

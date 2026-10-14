@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildEmbeddedRunBaseParams } from "./agent-runner-run-params.js";
+import { buildEmbeddedRunExecutionParams } from "./agent-runner-utils.js";
 import type { FollowupRun } from "./queue.js";
 
 const loadProviderScopedThinkingCatalog = vi.hoisted(() =>
@@ -44,7 +44,6 @@ describe("reply-path model thinking capability", () => {
         timeoutMs: 60_000,
         blockReplyBreak: "text_end",
         thinkLevel: "max",
-        thinkingExplicit: false,
         skipProviderRuntimeHints: true,
         thinkingCatalog: [
           {
@@ -56,13 +55,14 @@ describe("reply-path model thinking capability", () => {
           },
         ],
       };
-      const result = await buildEmbeddedRunBaseParams({
+      const result = await buildEmbeddedRunExecutionParams({
         run,
         provider: run.provider,
         model: run.model,
         agentRuntime: "codex",
         runId: "thinking-run",
-        authProfile: {},
+        sessionCtx: {},
+        hasRepliedRef: undefined,
       });
 
       expect(result.modelThinkingCapability).toEqual({
@@ -73,7 +73,6 @@ describe("reply-path model thinking capability", () => {
           supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
         },
       });
-      expect(result.thinkingExplicit).toBe(false);
     },
   );
 });

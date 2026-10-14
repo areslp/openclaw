@@ -8,7 +8,7 @@ import { buildBaseOptions } from "./simple-options.js";
 export type { OpenAICompletionsOptions } from "../provider-options.js";
 export { convertMessages } from "../openai-completions-messages.js";
 
-type OpenAIThinkingProvenanceOptions = {
+type OpenAIThinkingProvenanceOptions = OpenAICompletionsOptions & {
   openclawThinkingExplicit?: boolean;
 };
 
@@ -27,17 +27,16 @@ export const streamSimpleOpenAICompletions: StreamFunction<
   const clampedReasoning = options?.reasoning
     ? clampThinkingLevel(model, options.reasoning)
     : undefined;
-  const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
-  const openclawThinkingExplicit =
-    // SAFETY: The host adds only an optional runtime bit; omitted values preserve legacy behavior.
-    (options as (OpenAICompletionsOptions & OpenAIThinkingProvenanceOptions) | undefined)
-      ?.openclawThinkingExplicit;
+  // Host session streams attach selection intent without changing the public provider options.
+  const completionsOptions = options as OpenAIThinkingProvenanceOptions | undefined;
 
-  const completionsOptions = {
+  const providerOptions = {
     ...base,
     reasoningEffort: clampedReasoning,
-    toolChoice,
-    ...(openclawThinkingExplicit !== undefined ? { openclawThinkingExplicit } : {}),
-  };
-  return streamOpenAICompletions(model, context, completionsOptions);
+    toolChoice: completionsOptions?.toolChoice,
+    streaming: completionsOptions?.streaming,
+    openclawThinkingExplicit:
+      completionsOptions?.openclawThinkingExplicit ?? options?.reasoning !== undefined,
+  } satisfies OpenAIThinkingProvenanceOptions;
+  return streamOpenAICompletions(model, context, providerOptions);
 };

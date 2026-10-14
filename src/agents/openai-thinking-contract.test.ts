@@ -331,6 +331,21 @@ describe("OpenAI thinking contract", () => {
     }
   });
 
+  it.each(["managed", "direct"] as const)(
+    "omits declared chat-template effort without a standalone selection over %s HTTP",
+    async (transport) => {
+      const completions = await captureHttpProviderPayload({
+        api: "openai-completions",
+        thinkingFormat: "qwen-chat-template",
+        reasoningCompat: qwen38ChatTemplateEfforts,
+        transport,
+        mode: "standalone",
+      });
+      expect(completions).not.toHaveProperty("chat_template_kwargs.reasoning_effort");
+      expect(completions).not.toHaveProperty("openclawThinkingExplicit");
+    },
+  );
+
   it("retains standalone managed defaults when no reasoning option is supplied", async () => {
     const completions = await captureHttpProviderPayload({
       api: "openai-completions",

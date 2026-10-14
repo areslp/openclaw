@@ -1,5 +1,4 @@
 import os from "node:os";
-import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { installAcceptedSubagentGatewayMock } from "../../test-helpers/subagent-gateway.js";
@@ -31,7 +30,6 @@ type ThinkingProvenanceCase = {
   requesterState: Readonly<Record<string, unknown>>;
   context: SpawnSubagentTestContext;
   requesterThinkingDefault?: string;
-  template?: "declared" | "undeclared";
   spawnThinking?: string;
   expected?: string;
 };
@@ -39,8 +37,6 @@ type ThinkingProvenanceCase = {
 let configOverride: Record<string, unknown>;
 let resetSubagentRegistryForTests: typeof import("../registry/subagent-registry.test-helpers.js").resetSubagentRegistryForTests;
 let spawnSubagentDirect: typeof import("./subagent-spawn.js").spawnSubagentDirect;
-
-const requireRecord = createRequireRecord("record", "expected-non-array-record");
 
 function spawn(
   params: Parameters<typeof spawnSubagentDirect>[0],
@@ -59,13 +55,6 @@ function captureStore() {
   return () => captured;
 }
 
-function gatewayRequest(method: string): Record<string, unknown> {
-  const call = hoisted.callGatewayMock.mock.calls.find(
-    ([arg]) => requireRecord(arg).method === method,
-  );
-  return requireRecord(call?.[0]);
-}
-
 const thinkingCases: readonly ThinkingProvenanceCase[] = [
   {
     name: "inherits an explicitly selected active-turn level",
@@ -80,30 +69,27 @@ const thinkingCases: readonly ThinkingProvenanceCase[] = [
     expected: "ultra",
   },
   {
-    name: "inherits the active automatic level instead of a stale saved preference",
+    name: "does not save an automatic active level or a stale saved preference",
     requesterState: { thinkingLevel: "medium" },
     context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
-    expected: "high",
-  },
-  {
-    name: "keeps an unselected declared Qwen child at its template default",
-    requesterState: {},
-    context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
-    template: "declared",
     expected: undefined,
   },
   {
-    name: "inherits automatic thinking for an undeclared binary template",
+    name: "does not save an automatic parent tier for a child that can later switch models",
     requesterState: {},
     context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
-    template: "undeclared",
-    expected: "high",
+    expected: undefined,
   },
   {
-    name: "preserves an explicit spawn override for a declared Qwen child",
+    name: "does not save a requester model default when no active level was selected",
+    requesterState: {},
+    context: {},
+    expected: undefined,
+  },
+  {
+    name: "preserves an explicit spawn override over an automatic parent tier",
     requesterState: {},
     context: { requesterThinkingLevel: "high", requesterThinkingExplicit: false },
-    template: "declared",
     spawnThinking: "low",
     expected: "low",
   },
@@ -158,27 +144,6 @@ describe("subagent thinking provenance", () => {
       },
     });
     hoisted.loadSessionStoreMock.mockReturnValue({ "agent:main:main": testCase.requesterState });
-    if (testCase.template) {
-      hoisted.prepareModelChoiceMock.mockImplementation(async (params) => {
-        const choice = await supportedSpawnModelChoice(params);
-        if (choice.kind !== "resolved") {
-          return choice;
-        }
-        return {
-          ...choice,
-          model: {
-            ...choice.model,
-            reasoning: true,
-            compat: {
-              thinkingFormat: "qwen-chat-template",
-              ...(testCase.template === "declared"
-                ? { supportedReasoningEfforts: ["low", "medium", "xhigh"] }
-                : {}),
-            },
-          },
-        };
-      });
-    }
     const readStore = captureStore();
 
     const result = await spawn(
@@ -188,53 +153,5 @@ describe("subagent thinking provenance", () => {
 
     expect(result.status).toBe("accepted");
     expect(readStore()[result.childSessionKey!]?.thinkingLevel).toBe(testCase.expected);
-    expect(requireRecord(gatewayRequest("agent").params).thinking).toBe(testCase.spawnThinking);
-  });
-
-  it("marks persisted requester thinking as explicit", async () => {
-    const { readRequesterPreferences } = await import("./subagent-spawn-requester-prefs.js");
-    hoisted.loadSessionStoreMock.mockReturnValue({ "agent:main:main": { thinkingLevel: "low" } });
-
-    const preferences = await readRequesterPreferences({
-      cfg: {},
-      requesterInternalKey: "agent:main:main",
-      requesterAgentId: "main",
-    });
-
-    expect(preferences.thinkingLevel).toBe("low");
-    expect(preferences.thinkingExplicit).toBe(true);
-  });
-
-  it("marks configured requester-model thinking as explicit", async () => {
-    const { readRequesterPreferences } = await import("./subagent-spawn-requester-prefs.js");
-
-    const preferences = await readRequesterPreferences({
-      cfg: {
-        agents: {
-          defaults: {
-            model: { primary: "anthropic/claude-opus-5" },
-            models: { "anthropic/claude-opus-5": { params: { thinking: "high" } } },
-          },
-        },
-      },
-      requesterInternalKey: "agent:main:main",
-      requesterAgentId: "main",
-    });
-
-    expect(preferences.thinkingLevel).toBe("high");
-    expect(preferences.thinkingExplicit).toBe(true);
-  });
-
-  it("does not mark a model-resolved requester default as explicit", async () => {
-    const { readRequesterPreferences } = await import("./subagent-spawn-requester-prefs.js");
-
-    const preferences = await readRequesterPreferences({
-      cfg: { agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } },
-      requesterInternalKey: "agent:main:main",
-      requesterAgentId: "main",
-    });
-
-    expect(preferences.thinkingLevel).toBeDefined();
-    expect(preferences.thinkingExplicit).toBe(false);
   });
 });

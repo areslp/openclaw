@@ -130,20 +130,6 @@ function resolveThinkingCatalogEntry(
   );
 }
 
-function normalizeProfileLevel(
-  level: ProviderThinkingProfile["levels"][number],
-): RankedThinkingLevelOption | undefined {
-  const normalized = normalizeThinkLevel(level.id);
-  if (!normalized) {
-    return undefined;
-  }
-  return {
-    id: normalized,
-    label: normalizeOptionalString(level.label) ?? normalized,
-    rank: Number.isFinite(level.rank) ? (level.rank as number) : THINKING_LEVEL_RANKS[normalized],
-  };
-}
-
 function normalizeThinkingProfile(
   profile: ProviderThinkingProfile,
   thinkingLevelMap: ThinkingCatalogEntry["thinkingLevelMap"],
@@ -151,12 +137,17 @@ function normalizeThinkingProfile(
 ): ResolvedThinkingProfile {
   const byId = new Map<ThinkLevel, RankedThinkingLevelOption>();
   for (const raw of profile.levels) {
-    const level = normalizeProfileLevel(raw);
-    if (
-      level &&
-      (level.id === "adaptive" || level.id === "ultra" || thinkingLevelMap?.[level.id] !== null)
-    ) {
-      byId.set(level.id, level);
+    const id = normalizeThinkLevel(raw.id);
+    if (!id) {
+      continue;
+    }
+    const level = {
+      id,
+      label: normalizeOptionalString(raw.label) ?? id,
+      rank: Number.isFinite(raw.rank) ? (raw.rank as number) : THINKING_LEVEL_RANKS[id],
+    };
+    if (id === "adaptive" || id === "ultra" || thinkingLevelMap?.[id] !== null) {
+      byId.set(id, level);
     }
   }
   const levels = [...byId.values()].toSorted((a, b) => a.rank - b.rank);
@@ -175,14 +166,14 @@ function normalizeThinkingProfile(
   return normalized;
 }
 
-function buildBaseThinkingProfile(defaultLevel?: ThinkLevel): ResolvedThinkingProfile {
+function buildBaseThinkingProfile(): ResolvedThinkingProfile {
   return {
     levels: BASE_THINKING_LEVELS.map((id) => ({
       id,
       label: id,
       rank: THINKING_LEVEL_RANKS[id],
     })),
-    defaultLevel,
+    defaultLevel: undefined,
   };
 }
 
@@ -286,14 +277,7 @@ function resolveModelThinkingProfile(params: ThinkingProfileParams): ResolvedThi
     };
   }
 
-  // Chat templates that declare their efforts receive the selected level instead of applying
-  // their own default (xhigh for Qwen 3.8). High keeps an unset level near that depth rather
-  // than the generic medium fallback; undeclared templates never receive a level.
-  const declaresChatTemplateEfforts =
-    context.compat?.thinkingFormat === "qwen-chat-template" &&
-    context.compat.supportsReasoningEffort !== false &&
-    (context.compat.supportedReasoningEfforts?.length ?? 0) > 0;
-  const profile = buildBaseThinkingProfile(declaresChatTemplateEfforts ? "high" : undefined);
+  const profile = buildBaseThinkingProfile();
   appendCatalogAdvancedThinkingLevels(profile, context.compat, context.thinkingLevelMap);
   return normalizeThinkingProfile(profile, context.thinkingLevelMap, mappedLevels);
 }
@@ -386,8 +370,7 @@ export function formatThinkingLevels(
   catalog?: ThinkingCatalogEntry[],
   agentRuntime?: string | null,
 ): string {
-  const profile = resolveThinkingProfile({ provider, model, catalog, agentRuntime });
-  return profile.levels.map(({ label }) => label).join(separator);
+  return listThinkingLevelLabels(provider, model, catalog, agentRuntime).join(separator);
 }
 
 /** Resolve the default thinking level for a provider/model pair. */
