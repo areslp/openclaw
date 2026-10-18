@@ -1,3 +1,5 @@
+import { isIncognitoSessionKey } from "../shared/incognito-session-key.js";
+
 export type SessionStateValue = "idle" | "processing" | "waiting";
 
 export type SessionState = {
@@ -205,6 +207,26 @@ export function peekDiagnosticSessionState(ref: SessionRef): SessionState | unde
     diagnosticSessionStates.get(key) ??
     (ref.sessionId ? findStateEntryBySessionId(ref.sessionId)?.[1] : undefined)
   );
+}
+
+/** Classify optional output without admitting new diagnostic state. */
+export function resolveDiagnosticSessionKey(ref: SessionRef): string | undefined {
+  return ref.sessionKey ?? peekDiagnosticSessionState(ref)?.sessionKey;
+}
+
+export function isIncognitoDiagnosticSession(ref: SessionRef): boolean {
+  return (
+    isIncognitoSessionKey(ref.sessionKey) ||
+    isIncognitoSessionKey(peekDiagnosticSessionState(ref)?.sessionKey)
+  );
+}
+
+/** Renews this observation and invalidates recovery captured before the progress. */
+export function touchDiagnosticSessionState(state: SessionState): void {
+  state.lastActivity = Date.now();
+  state.generation = (state.generation ?? 0) + 1;
+  state.lastStuckWarnAgeMs = undefined;
+  state.lastLongRunningWarnAgeMs = undefined;
 }
 
 /** Retires collector observations without resetting independent tool-loop or poll policy. */
