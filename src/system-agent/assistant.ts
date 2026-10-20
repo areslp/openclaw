@@ -1,18 +1,9 @@
-// OpenClaw assistant planning converts fuzzy user text into one safe command.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { prepareSystemAgentRunAdmission } from "../agents/admitted-run-context.js";
 import { extractAgentRunTerminalError, extractAgentRunText } from "../agents/agent-run-result.js";
-import {
-  PreparedModelRuntimeOwnerNotPublishedError,
-  PreparedModelRuntimePublicationSupersededError,
-} from "../agents/prepared-model-runtime.errors.js";
-import {
-  AGENT_RUN_SUPERSEDED_STOP_REASON,
-  isAgentRunSupersededAbortReason,
-} from "../agents/run-termination.js";
 import { SessionManager } from "../agents/sessions/session-manager.js";
 import { CommandLane } from "../process/lanes.js";
 import {
@@ -27,12 +18,15 @@ import {
 import { resolveSystemAgentAssistantTimeoutMs } from "./assistant-timeout.js";
 import type { SystemAgentGreetingFacts, SystemAgentGreetingPlan } from "./greeting.js";
 import { SystemAgentInferenceUnavailableError } from "./inference-error.js";
+import { requireSystemAgentInferenceRoute } from "./inference-guard.js";
+import {
+  systemAgentRuntimeFailureGuidance,
+  systemAgentTerminalFailureGuidance,
+} from "./inference-run-errors.js";
 import type { SystemAgentOverview } from "./overview.js";
 import {
   resolveSystemAgentExpectedAgentHarnessRuntimeArtifact,
-  resolveSystemAgentVerifiedInferenceRoute,
   type SystemAgentVerifiedInferenceBinding,
-  type SystemAgentVerifiedInferenceDeps,
 } from "./verified-inference.js";
 
 export {
@@ -67,7 +61,6 @@ export async function planSystemAgentCommand(params: {
   history?: SystemAgentAssistantTurn[];
   pendingOperation?: string;
   readonly verifiedInference: SystemAgentVerifiedInferenceBinding;
-  deps?: SystemAgentVerifiedInferenceDeps;
 }): Promise<SystemAgentAssistantPlan | null> {
   const input = params.input.trim();
   if (!input) {
@@ -84,7 +77,6 @@ export async function planSystemAgentCommand(params: {
     systemPrompt: SYSTEM_AGENT_ASSISTANT_SYSTEM_PROMPT,
     runIdPrefix: "openclaw-planner",
     verifiedInference: params.verifiedInference,
-    deps: params.deps,
     responseFormat: SYSTEM_AGENT_PLANNER_RESPONSE_SCHEMA,
   });
   const parsed = parseSystemAgentAssistantPlanText(result?.text);
@@ -96,7 +88,6 @@ export async function planSystemAgentGreetingWithConfiguredModel(params: {
   overview: SystemAgentOverview;
   facts: SystemAgentGreetingFacts;
   readonly verifiedInference: SystemAgentVerifiedInferenceBinding;
-  deps?: SystemAgentVerifiedInferenceDeps;
   timeoutMs: number;
 }): Promise<SystemAgentGreetingPlan | null> {
   const result = await runConfiguredSystemAgentText({
@@ -104,7 +95,6 @@ export async function planSystemAgentGreetingWithConfiguredModel(params: {
     systemPrompt: SYSTEM_AGENT_GREETING_SYSTEM_PROMPT,
     runIdPrefix: "openclaw-greeting",
     verifiedInference: params.verifiedInference,
-    deps: params.deps,
     timeoutMs: params.timeoutMs,
   });
   return result ? { text: result.text, modelRef: result.modelLabel } : null;
@@ -115,11 +105,14 @@ async function runConfiguredSystemAgentText(params: {
   systemPrompt: string;
   runIdPrefix: string;
   readonly verifiedInference: SystemAgentVerifiedInferenceBinding;
-  deps?: SystemAgentVerifiedInferenceDeps;
   timeoutMs?: number;
   responseFormat?: Record<string, unknown>;
 }): Promise<{ text: string; modelLabel: string } | null> {
-  const route = await requireVerifiedPlannerRoute(params.verifiedInference, params.deps);
+  const route = await requireSystemAgentInferenceRoute(
+    params.verifiedInference,
+    undefined,
+    "planner",
+  );
   let expectedAgentHarnessRuntimeArtifact: ReturnType<
     typeof resolveSystemAgentExpectedAgentHarnessRuntimeArtifact
   >;
@@ -198,11 +191,7 @@ async function runConfiguredSystemAgentText(params: {
       throw new SystemAgentInferenceUnavailableError(
         "planner",
         [new Error(terminalError)],
-        result.meta?.stopReason === "timeout" || result.meta?.timeoutPhase
-          ? "timeout"
-          : result.meta?.stopReason === AGENT_RUN_SUPERSEDED_STOP_REASON
-            ? "superseded"
-            : "retry",
+        systemAgentTerminalFailureGuidance(result),
       );
     }
     text = extractAgentRunText(result);
@@ -210,14 +199,9 @@ async function runConfiguredSystemAgentText(params: {
     if (error instanceof SystemAgentInferenceUnavailableError) {
       throw error;
     }
-    if (
-      isAgentRunSupersededAbortReason(error) ||
-      error instanceof PreparedModelRuntimePublicationSupersededError
-    ) {
-      throw new SystemAgentInferenceUnavailableError("planner", [error], "superseded");
-    }
-    if (error instanceof PreparedModelRuntimeOwnerNotPublishedError) {
-      throw new SystemAgentInferenceUnavailableError("planner", [error], "runtime-unavailable");
+    const guidance = systemAgentRuntimeFailureGuidance(error);
+    if (guidance) {
+      throw new SystemAgentInferenceUnavailableError("planner", [error], guidance);
     }
     text = undefined;
   } finally {
@@ -229,24 +213,6 @@ async function runConfiguredSystemAgentText(params: {
   }
   // Cleanup is the final suspension before callers can display model text, so
   // authority must still match after cleanup completes.
-  await requireVerifiedPlannerRoute(params.verifiedInference, params.deps);
+  await requireSystemAgentInferenceRoute(params.verifiedInference, undefined, "planner");
   return { text, modelLabel: route.modelLabel };
-}
-
-async function requireVerifiedPlannerRoute(
-  binding: SystemAgentVerifiedInferenceBinding | undefined,
-  deps: SystemAgentVerifiedInferenceDeps | undefined,
-) {
-  if (!binding) {
-    throw new SystemAgentInferenceUnavailableError("planner", [], "setup");
-  }
-  try {
-    const route = await resolveSystemAgentVerifiedInferenceRoute(binding, deps);
-    if (route) {
-      return route;
-    }
-  } catch (error) {
-    throw new SystemAgentInferenceUnavailableError("planner", [error], "route-changed");
-  }
-  throw new SystemAgentInferenceUnavailableError("planner", [], "route-changed");
 }

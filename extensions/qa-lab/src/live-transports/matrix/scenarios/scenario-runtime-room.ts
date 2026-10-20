@@ -11,13 +11,11 @@ import {
 } from "./scenario-runtime-reaction.js";
 import {
   assertThreadReplyArtifact,
-  advanceMatrixQaActorCursor,
   buildMatrixQaToken,
   buildMatrixBlockStreamingPrompt,
   buildMatrixReplyArtifact,
   buildMatrixReplyDetails,
   buildMentionPrompt,
-  createMatrixQaDriverScenarioClient,
   createMatrixQaScenarioClient,
   isMatrixQaMessageLikeKind,
   primeMatrixQaDriverScenarioClient,
@@ -89,12 +87,6 @@ export async function runBlockStreamingScenario(context: MatrixQaScenarioContext
       "Matrix block streaming scenario reused one event instead of preserving blocks",
     );
   }
-  advanceMatrixQaActorCursor({
-    actorId: "driver",
-    syncState: context.syncState,
-    nextSince: secondBlock.since,
-    startSince,
-  });
   return {
     artifacts: {
       blockEventIds: [firstBlock.event.eventId, secondBlock.event.eventId],
@@ -133,12 +125,6 @@ export async function runRoomAutoJoinInviteScenario(context: MatrixQaScenarioCon
     timeoutMs: context.timeoutMs,
   });
   const joinEvent = joinResult.event;
-  advanceMatrixQaActorCursor({
-    actorId: "driver",
-    syncState: context.syncState,
-    nextSince: joinResult.since,
-    startSince,
-  });
 
   const result = await runAssertedDriverTopLevelScenario({
     context,
@@ -165,52 +151,6 @@ export async function runRoomAutoJoinInviteScenario(context: MatrixQaScenarioCon
   } satisfies MatrixQaScenarioExecution;
 }
 
-async function restoreMembershipLossRoom(params: {
-  context: MatrixQaScenarioContext;
-  driverClient: ReturnType<typeof createMatrixQaDriverScenarioClient>;
-  roomId: string;
-  sutClient: ReturnType<typeof createMatrixQaScenarioClient>;
-}) {
-  await params.driverClient.inviteUserToRoom({
-    roomId: params.roomId,
-    userId: params.context.sutUserId,
-  });
-  await waitForMembershipEvent({
-    ...resolveMatrixQaActorSyncParams(params.context, "driver"),
-    membership: "invite",
-    roomId: params.roomId,
-    stateKey: params.context.sutUserId,
-    timeoutMs: params.context.timeoutMs,
-  });
-  await params.sutClient.joinRoom(params.roomId);
-  return await waitForMembershipEvent({
-    ...resolveMatrixQaActorSyncParams(params.context, "driver"),
-    membership: "join",
-    roomId: params.roomId,
-    stateKey: params.context.sutUserId,
-    timeoutMs: params.context.timeoutMs,
-  });
-}
-
-async function ensureMembershipLossRoomRestored(params: {
-  driverClient: ReturnType<typeof createMatrixQaDriverScenarioClient>;
-  roomId: string;
-  sutClient: ReturnType<typeof createMatrixQaScenarioClient>;
-  sutUserId: string;
-}) {
-  try {
-    await params.sutClient.joinRoom(params.roomId);
-    return;
-  } catch {
-    // A kicked member needs an invite; an already joined member succeeds above.
-  }
-  await params.driverClient.inviteUserToRoom({
-    roomId: params.roomId,
-    userId: params.sutUserId,
-  });
-  await params.sutClient.joinRoom(params.roomId);
-}
-
 export async function runMembershipLossScenario(context: MatrixQaScenarioContext) {
   const roomId = resolveMatrixQaScenarioRoomId(context, MATRIX_QA_MEMBERSHIP_ROOM_KEY);
   const { client: driverClient } = await primeMatrixQaDriverScenarioClient(context);
@@ -218,6 +158,14 @@ export async function runMembershipLossScenario(context: MatrixQaScenarioContext
     accessToken: context.sutAccessToken,
     baseUrl: context.baseUrl,
   });
+  const waitForMembership = (membership: "invite" | "join" | "leave") =>
+    waitForMembershipEvent({
+      ...resolveMatrixQaActorSyncParams(context, "driver"),
+      membership,
+      roomId,
+      stateKey: context.sutUserId,
+      timeoutMs: context.timeoutMs,
+    });
   let membershipRestored = false;
 
   try {
@@ -226,13 +174,7 @@ export async function runMembershipLossScenario(context: MatrixQaScenarioContext
       roomId,
       userId: context.sutUserId,
     });
-    const leaveEvent = await waitForMembershipEvent({
-      ...resolveMatrixQaActorSyncParams(context, "driver"),
-      membership: "leave",
-      roomId,
-      stateKey: context.sutUserId,
-      timeoutMs: context.timeoutMs,
-    });
+    const leaveEvent = await waitForMembership("leave");
 
     const noReplyToken = buildMatrixQaToken("MATRIX_QA_MEMBERSHIP_LOSS");
     await runNoReplyExpectedScenario({
@@ -246,17 +188,16 @@ export async function runMembershipLossScenario(context: MatrixQaScenarioContext
       token: noReplyToken,
     });
 
-    const joinEvent = await restoreMembershipLossRoom({
-      context,
-      driverClient,
+    await driverClient.inviteUserToRoom({
       roomId,
-      sutClient,
+      userId: context.sutUserId,
     });
+    await waitForMembership("invite");
+    await sutClient.joinRoom(roomId);
+    const joinEvent = await waitForMembership("join");
     membershipRestored = true;
     const recovered = await runTopologyScopedTopLevelScenario({
-      accessToken: context.driverAccessToken,
       actorId: "driver",
-      actorUserId: context.driverUserId,
       context,
       roomKey: MATRIX_QA_MEMBERSHIP_ROOM_KEY,
       tokenPrefix: "MATRIX_QA_MEMBERSHIP_RETURN",
@@ -282,12 +223,13 @@ export async function runMembershipLossScenario(context: MatrixQaScenarioContext
     // A lost kick response can still mean the kick applied.
     if (!membershipRestored) {
       try {
-        await ensureMembershipLossRoomRestored({
-          driverClient,
-          roomId,
-          sutClient,
-          sutUserId: context.sutUserId,
-        });
+        try {
+          await sutClient.joinRoom(roomId);
+        } catch {
+          // A kicked member needs an invite; an already joined member succeeds above.
+          await driverClient.inviteUserToRoom({ roomId, userId: context.sutUserId });
+          await sutClient.joinRoom(roomId);
+        }
       } catch (cleanupError) {
         throw new AggregateError(
           [error, cleanupError],
@@ -315,12 +257,6 @@ export async function runReactionThreadedScenario(context: MatrixQaScenarioConte
     reactionTargetEventId: thread.reply.eventId,
     roomId: context.roomId,
     timeoutMs: context.timeoutMs,
-  });
-  advanceMatrixQaActorCursor({
-    actorId: reaction.actorId,
-    syncState: context.syncState,
-    nextSince: reaction.since,
-    startSince: reaction.startSince,
   });
   return {
     artifacts: {
