@@ -4,12 +4,14 @@ import { detectMime, mediaKindFromMime } from "openclaw/plugin-sdk/media-mime";
 import {
   buildOutboundMediaLoadOptions,
   MEDIA_FFMPEG_MAX_AUDIO_DURATION_SECS,
+  runFfprobe,
   transcodeAudioBufferToOpus,
   type OutboundMediaAccess,
 } from "openclaw/plugin-sdk/media-runtime";
 import type { SavedMedia } from "openclaw/plugin-sdk/media-store";
 import type { ReplyPayloadTtsSupplement } from "openclaw/plugin-sdk/reply-payload";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { resolvePreferredOpenClawTmpDir, withTempWorkspace } from "openclaw/plugin-sdk/temp-path";
 import type { ClawdbotConfig } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
@@ -23,7 +25,6 @@ import { sendReplyOrFallbackDirect } from "./send.js";
 import type { FeishuSendResult } from "./types.js";
 import {
   FEISHU_VIDEO_PREVIEW_TIMEOUT_MS,
-  probeFeishuMediaDurationMs,
   maybeUploadVideoPreviewImageKey,
 } from "./video-preview.js";
 
@@ -63,12 +64,6 @@ const FEISHU_TRANSCODABLE_AUDIO_EXTS = new Set([
   ".webm",
   ".wma",
 ]);
-
-type SaveMessageResourceResult = {
-  saved: SavedMedia;
-  contentType?: string;
-  fileName?: string;
-};
 
 function createConfiguredFeishuMediaClient(params: {
   cfg: ClawdbotConfig;
@@ -210,7 +205,7 @@ async function saveMessageResourceWithType(params: {
   type: FeishuMessageResourceDownloadType;
   maxBytes: number;
   originalFilename?: string;
-}): Promise<SaveMessageResourceResult> {
+}): Promise<SavedMedia> {
   const response = await params.client.im.messageResource.get({
     path: { message_id: params.messageId, file_key: params.fileKey },
     params: { type: params.type },
@@ -220,7 +215,7 @@ async function saveMessageResourceWithType(params: {
   const contentType = readHeaderValue(headers, "content-type");
   const disposition = readHeaderValue(headers, "content-disposition");
   const fileName = disposition ? decodeDispositionFileName(disposition) : undefined;
-  const saved = await saveMediaStreamWithIdleTimeout(
+  return await saveMediaStreamWithIdleTimeout(
     response.getReadableStream(),
     contentType,
     params.maxBytes,
@@ -230,7 +225,6 @@ async function saveMessageResourceWithType(params: {
         : undefined),
     FEISHU_MEDIA_HTTP_TIMEOUT_MS,
   );
-  return { saved, contentType, fileName };
 }
 
 export async function saveMessageResourceFeishu(params: {
@@ -241,7 +235,7 @@ export async function saveMessageResourceFeishu(params: {
   accountId?: string;
   maxBytes: number;
   originalFilename?: string;
-}): Promise<SaveMessageResourceResult> {
+}): Promise<SavedMedia> {
   const { cfg, messageId, fileKey, type, accountId, maxBytes, originalFilename } = params;
   const normalizedFileKey = normalizeFeishuExternalKey(fileKey);
   if (!normalizedFileKey) {
@@ -475,42 +469,33 @@ export function shouldSuppressFeishuTextForVoiceMedia(params: {
   });
 }
 
-function isLikelyTranscodableAudio(params: { fileName: string; contentType?: string }): boolean {
-  const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
-  const contentType = normalizeLowercaseStringOrEmpty(params.contentType);
-  return FEISHU_TRANSCODABLE_AUDIO_EXTS.has(ext) || mediaKindFromMime(contentType) === "audio";
-}
-
-async function prepareFeishuVoiceMedia(
-  params: FeishuMedia & { audioAsVoice?: boolean },
-): Promise<FeishuMedia> {
-  if (isFeishuNativeVoiceAudio(params)) {
-    return params;
-  }
-  if (params.audioAsVoice !== true || !isLikelyTranscodableAudio(params)) {
-    return params;
-  }
+async function probeMediaDurationMs(params: FeishuMedia): Promise<number | undefined> {
   try {
-    return {
-      buffer: await transcodeAudioBufferToOpus({
-        audioBuffer: params.buffer,
-        inputFileName: params.fileName,
-        tempPrefix: "feishu-voice-",
-        outputFileName: FEISHU_VOICE_FILE_NAME,
-        sampleRateHz: 48_000,
-        bitrate: "64k",
-        channels: 1,
-        maxDurationSeconds: MEDIA_FFMPEG_MAX_AUDIO_DURATION_SECS,
-      }),
-      fileName: FEISHU_VOICE_FILE_NAME,
-      contentType: "audio/ogg",
-    };
-  } catch (err) {
-    console.warn(
-      `[feishu] audioAsVoice transcode failed; sending ${params.fileName} as a file attachment:`,
-      err,
+    return await withTempWorkspace(
+      { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-media-probe-" },
+      async (workspace) => {
+        const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
+        const inferredExt =
+          ext && ext.length <= 12
+            ? ext
+            : mediaKindFromMime(params.contentType) === "video"
+              ? ".mp4"
+              : ".ogg";
+        const inputPath = await workspace.write(`input${inferredExt}`, params.buffer);
+        const stdout = await runFfprobe(
+          ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", inputPath],
+          { timeoutMs: 5_000 },
+        );
+        const seconds = Number.parseFloat(stdout.trim());
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          return undefined;
+        }
+        return Math.max(1, Math.round(seconds * 1000));
+      },
     );
-    return params;
+  } catch (err) {
+    console.warn("[feishu] failed to check media duration; upload will omit it:", err);
+    return undefined;
   }
 }
 
@@ -578,9 +563,38 @@ export async function sendMediaFeishu(
     }),
   );
 
-  const prepared = await runBeforeFeishuMessageDispatch(() =>
-    prepareFeishuVoiceMedia({ ...loaded, audioAsVoice }),
-  );
+  const prepared = await runBeforeFeishuMessageDispatch(async () => {
+    if (isFeishuNativeVoiceAudio(loaded) || audioAsVoice !== true) {
+      return loaded;
+    }
+    const ext = normalizeLowercaseStringOrEmpty(path.extname(loaded.fileName));
+    const contentType = normalizeLowercaseStringOrEmpty(loaded.contentType);
+    if (!FEISHU_TRANSCODABLE_AUDIO_EXTS.has(ext) && mediaKindFromMime(contentType) !== "audio") {
+      return loaded;
+    }
+    try {
+      return {
+        buffer: await transcodeAudioBufferToOpus({
+          audioBuffer: loaded.buffer,
+          inputFileName: loaded.fileName,
+          tempPrefix: "feishu-voice-",
+          outputFileName: FEISHU_VOICE_FILE_NAME,
+          sampleRateHz: 48_000,
+          bitrate: "64k",
+          channels: 1,
+          maxDurationSeconds: MEDIA_FFMPEG_MAX_AUDIO_DURATION_SECS,
+        }),
+        fileName: FEISHU_VOICE_FILE_NAME,
+        contentType: "audio/ogg",
+      };
+    } catch (err) {
+      console.warn(
+        `[feishu] audioAsVoice transcode failed; sending ${loaded.fileName} as a file attachment:`,
+        err,
+      );
+      return loaded;
+    }
+  });
   const { buffer, fileName: name, contentType } = prepared;
 
   const routing =
@@ -601,7 +615,7 @@ export async function sendMediaFeishu(
 
   const durationMs =
     routing.msgType === "audio" || routing.msgType === "media"
-      ? await probeFeishuMediaDurationMs(prepared)
+      ? await probeMediaDurationMs({ buffer, fileName: name, contentType })
       : undefined;
   const media = await runBeforeFeishuMessageDispatch(async () => {
     const client = createConfiguredFeishuMediaClient({ cfg, accountId });

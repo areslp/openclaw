@@ -1,8 +1,7 @@
-// Feishu outbound video preview cover and upload duration helpers.
+// Feishu outbound video preview cover helpers.
 import fs from "node:fs";
 import path from "node:path";
-import { mediaKindFromMime } from "openclaw/plugin-sdk/media-mime";
-import { runFfmpeg, runFfprobe } from "openclaw/plugin-sdk/media-runtime";
+import { runFfmpeg } from "openclaw/plugin-sdk/media-runtime";
 import { writeExternalFileWithinRoot } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePreferredOpenClawTmpDir, withTempWorkspace } from "openclaw/plugin-sdk/temp-path";
@@ -121,40 +120,6 @@ export async function maybeUploadVideoPreviewImageKey(params: {
     return result.value;
   } catch (err) {
     console.warn("[feishu] failed to upload video preview; sending video without cover:", err);
-    return undefined;
-  }
-}
-
-export async function probeFeishuMediaDurationMs(params: {
-  buffer: Buffer;
-  fileName: string;
-  contentType?: string;
-}): Promise<number | undefined> {
-  try {
-    return await withTempWorkspace(
-      { rootDir: resolvePreferredOpenClawTmpDir(), prefix: "feishu-media-probe-" },
-      async (workspace) => {
-        const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
-        const inferredExt =
-          ext && ext.length <= 12
-            ? ext
-            : mediaKindFromMime(params.contentType) === "video"
-              ? ".mp4"
-              : ".ogg";
-        const inputPath = await workspace.write(`input${inferredExt}`, params.buffer);
-        const stdout = await runFfprobe(
-          ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", inputPath],
-          { timeoutMs: 5_000 },
-        );
-        const seconds = Number.parseFloat(stdout.trim());
-        if (!Number.isFinite(seconds) || seconds <= 0) {
-          return undefined;
-        }
-        return Math.max(1, Math.round(seconds * 1000));
-      },
-    );
-  } catch (err) {
-    console.warn("[feishu] failed to probe media duration; upload will omit it:", err);
     return undefined;
   }
 }
